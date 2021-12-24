@@ -298,11 +298,15 @@ ensure_security(User, UserDb, TransformFun) ->
        % TODO: make sure this is still true: single node, ignore
        ok;
     {ok, Shards} ->
+        couch_log:debug("peruser: ensure_security ~s", [UserDb]),
         {_ShardInfo, {SecProps}} = hd(Shards),
         % assert that shards have the same security object
-        true = lists:all(fun ({_, {SecProps1}}) ->
+        Success = lists:all(fun ({_, {SecProps1}}) ->
             SecProps =:= SecProps1
         end, Shards),
+        case Success of
+        false -> couch_log:error("couch_peruser ensure_security failure for user ~p, db ~p", [User, UserDb])
+        end,
         case lists:foldl(
                fun (Prop, SAcc) -> TransformFun(User, Prop, SAcc) end,
                {false, SecProps},
