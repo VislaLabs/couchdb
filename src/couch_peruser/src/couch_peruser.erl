@@ -298,11 +298,16 @@ ensure_security(User, UserDb, TransformFun) ->
        % TODO: make sure this is still true: single node, ignore
        ok;
     {ok, Shards} ->
+        couch_log:debug("peruser: ensure_security ~s for shards ~p", [UserDb, Shards]),
         {_ShardInfo, {SecProps}} = hd(Shards),
-        % assert that shards have the same security object
-        true = lists:all(fun ({_, {SecProps1}}) ->
+        % check that shards have the same security object
+        case lists:all(fun ({_, {SecProps1}}) ->
             SecProps =:= SecProps1
-        end, Shards),
+        end, Shards) of
+        false ->
+            couch_log:error("couch_peruser ensure_security failure on ~s for shards ~p. Please fix manually", [UserDb, Shards]),
+            ok;
+        true ->
         case lists:foldl(
                fun (Prop, SAcc) -> TransformFun(User, Prop, SAcc) end,
                {false, SecProps},
@@ -311,6 +316,7 @@ ensure_security(User, UserDb, TransformFun) ->
             ok;
         {true, SecProps1} ->
             ok = fabric:set_security(UserDb, {SecProps1}, [?ADMIN_CTX])
+            end
         end
     end.
 
