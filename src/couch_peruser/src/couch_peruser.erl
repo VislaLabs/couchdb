@@ -391,17 +391,23 @@ ensure_security(User, UserDb, TransformFun) ->
                 couch_log:error("couch_peruser ensure_security failure on ~s for shards ~p. Please fix manually", [UserDb, Shards]),
                 ok;
             true ->
-            case
-                lists:foldl(
-                    fun(Prop, SAcc) -> TransformFun(User, Prop, SAcc) end,
-                    {false, SecProps},
-                    [<<"admins">>, <<"members">>]
-                )
-            of
-                {false, _} ->
-                    ok;
-                {true, SecProps1} ->
-                    ok = fabric:set_security(UserDb, {SecProps1}, [?ADMIN_CTX])
+                Props = case couch_util:get_value(<<"public">>, SecProps, false) of
+                    true ->
+                        [<<"admins">>];
+                    false ->
+                        [<<"admins">>, <<"members">>]
+                    end,
+                case
+                    lists:foldl(
+                        fun(Prop, SAcc) -> TransformFun(User, Prop, SAcc) end,
+                        {false, SecProps},
+                        [<<"admins">>, <<"members">>]
+                    )
+                of
+                    {false, _} ->
+                        ok;
+                    {true, SecProps1} ->
+                        ok = fabric:set_security(UserDb, {SecProps1}, [?ADMIN_CTX])
                     end
             end
     end.
