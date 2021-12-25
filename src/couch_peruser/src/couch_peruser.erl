@@ -313,9 +313,12 @@ ensure_security(User, UserDb, TransformFun) ->
         {true, SecProps1} ->
             ok = fabric:set_security(UserDb, {SecProps1}, [?ADMIN_CTX])
         end,
-        case Success of 
+        case Success of
+        true ->
+            ok;
         false ->
-            couch_log:error("couch_peruser ensure_security failure on ~s", [UserDb])
+            couch_log:error("couch_peruser ensure_security failure on ~s", [UserDb]),
+            ok
         end
     end.
 
