@@ -109,11 +109,11 @@ init_state() ->
 -spec start_listening(State :: #state{}) -> #state{} | ok.
 start_listening(#state{states=ChangesStates}=State)
     when length(ChangesStates) > 0 ->
-    % couch_log:debug("peruser: start_listening() already run on node ~p in pid ~p", [node(), self()]),
+    couch_log:debug("peruser: start_listening() already run on node ~p in pid ~p", [node(), self()]),
     State;
 start_listening(#state{db_name=DbName, delete_dbs=DeleteDbs,
     q_for_peruser_db = Q, peruser_dbname_prefix = Prefix} = State) ->
-    % couch_log:debug("peruser: start_listening() on node ~p", [node()]),
+    couch_log:debug("peruser: start_listening() on node ~p", [node()]),
     try
         States = lists:map(fun (A) ->
             S = #changes_state{
@@ -127,7 +127,7 @@ start_listening(#state{db_name=DbName, delete_dbs=DeleteDbs,
                 ?MODULE, init_changes_handler, [S], [link, monitor]),
             S#changes_state{changes_pid=Pid, changes_ref=Ref}
         end, mem3:local_shards(DbName)),
-        % couch_log:debug("peruser: start_listening() States ~p", [States]),
+        couch_log:debug("peruser: start_listening() States ~p", [States]),
 
         State#state{states = States, cluster_stable = true}
     catch error:database_does_not_exist ->
@@ -137,7 +137,7 @@ start_listening(#state{db_name=DbName, delete_dbs=DeleteDbs,
 
 -spec init_changes_handler(ChangesState :: #changes_state{}) -> ok.
 init_changes_handler(#changes_state{db_name=DbName} = ChangesState) ->
-    % couch_log:debug("peruser: init_changes_handler() on DbName ~p", [DbName]),
+    couch_log:debug("peruser: init_changes_handler() on DbName ~p", [DbName]),
     try
         {ok, Db} = couch_db:open_int(DbName, [?ADMIN_CTX, sys_db]),
         FunAcc = {fun ?MODULE:changes_handler/3, ChangesState},
@@ -159,7 +159,7 @@ changes_handler(
     _ResType,
     ChangesState=#changes_state{db_name=DbName, q_for_peruser_db = Q,
         peruser_dbname_prefix = Prefix}) ->
-    % couch_log:debug("peruser: changes_handler() on DbName/Doc ~p/~p", [DbName, Doc]),
+    couch_log:debug("peruser: changes_handler() on DbName/Doc ~p/~p", [DbName, Doc]),
 
     case couch_util:get_value(<<"id">>, Doc) of
     <<"org.couchdb.user:",User/binary>> = DocId ->
