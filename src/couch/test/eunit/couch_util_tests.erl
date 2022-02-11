@@ -15,41 +15,6 @@
 -include_lib("couch/include/couch_eunit.hrl").
 
 
-setup() ->
-    %% We cannot start driver from here since it becomes bounded to eunit
-    %% master process and the next couch_server_sup:start_link call will
-    %% fail because server couldn't load driver since it already is.
-    %%
-    %% On other hand, we cannot unload driver here due to
-    %% {error, not_loaded_by_this_process} while it is. Any ideas is welcome.
-    %%
-    Ctx = test_util:start_couch(),
-    %% config:start_link(?CONFIG_CHAIN),
-    %% {ok, _} = couch_drv:start_link(),
-    Ctx.
-
-teardown(Ctx) ->
-    ok = test_util:stop_couch(Ctx),
-    %% config:stop(),
-    %% erl_ddll:unload_driver(couch_icu_driver),
-    ok.
-
-
-collation_test_() ->
-    {
-        "Collation tests",
-        [
-            {
-                setup,
-                fun setup/0, fun teardown/1,
-                [
-                    should_collate_ascii(),
-                    should_collate_non_ascii()
-                ]
-            }
-        ]
-    }.
-
 validate_callback_exists_test_() ->
     {
         "validate_callback_exists tests",
@@ -58,12 +23,6 @@ validate_callback_exists_test_() ->
             should_fail_for_missing_cb()
         ]
     }.
-
-should_collate_ascii() ->
-    ?_assertEqual(1, couch_util:collate(<<"foo">>, <<"bar">>)).
-
-should_collate_non_ascii() ->
-    ?_assertEqual(-1, couch_util:collate(<<"A">>, <<"aa">>)).
 
 to_existed_atom_test() ->
     ?assert(couch_util:to_existing_atom(true)),
@@ -167,4 +126,11 @@ to_hex_test_() ->
         ?_assertEqual("010203faff", couch_util:to_hex([1, 2, 3, 250, 255])),
         ?_assertEqual("", couch_util:to_hex(<<>>)),
         ?_assertEqual("010203faff", couch_util:to_hex(<<1, 2, 3, 250, 255>>))
+    ].
+
+json_decode_test_() ->
+    [
+        ?_assertEqual({[]}, couch_util:json_decode(<<"{}">>)),
+        ?_assertEqual({[]}, couch_util:json_decode(<<"{}">>, [])),
+        ?_assertEqual(#{}, couch_util:json_decode(<<"{}">>, [return_maps]))
     ].

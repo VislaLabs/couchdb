@@ -59,7 +59,8 @@ json_req_obj_field(<<"headers">>, #httpd{mochi_req=Req}, _Db, _DocId) ->
     Hlist = mochiweb_headers:to_list(Headers),
     to_json_terms(Hlist);
 json_req_obj_field(<<"body">>, #httpd{req_body=undefined, mochi_req=Req}, _Db, _DocId) ->
-    MaxSize = config:get_integer("httpd", "max_http_request_size", 4294967296),
+    MaxSize = chttpd_util:get_chttpd_config_integer(
+        "max_http_request_size", 4294967296),
     try
         Req:recv_body(MaxSize)
     catch exit:normal ->
@@ -67,8 +68,10 @@ json_req_obj_field(<<"body">>, #httpd{req_body=undefined, mochi_req=Req}, _Db, _
     end;
 json_req_obj_field(<<"body">>, #httpd{req_body=Body}, _Db, _DocId) ->
     Body;
-json_req_obj_field(<<"peer">>, #httpd{mochi_req=Req}, _Db, _DocId) ->
+json_req_obj_field(<<"peer">>, #httpd{peer=undefined, mochi_req=Req}, _, _) ->
     ?l2b(Req:get(peer));
+json_req_obj_field(<<"peer">>, #httpd{peer=Peer}, _Db, _DocId) ->
+    ?l2b(Peer);
 json_req_obj_field(<<"form">>, #httpd{mochi_req=Req, method=Method}=HttpReq, Db, DocId) ->
     Body = json_req_obj_field(<<"body">>, HttpReq, Db, DocId),
     ParsedForm = case Req:get_primary_header_value("content-type") of

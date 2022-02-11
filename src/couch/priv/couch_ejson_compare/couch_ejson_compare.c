@@ -13,12 +13,17 @@
  */
 
 #include <stdio.h>
+#include <string.h>
 #include <assert.h>
 #include "erl_nif.h"
 #include "unicode/ucol.h"
 #include "unicode/ucasemap.h"
 
 #define MAX_DEPTH 10
+
+#define NO_ERROR 0
+#define BAD_ARG_ERROR 1
+#define MAX_DEPTH_ERROR 2
 
 #if (ERL_NIF_MAJOR_VERSION > 2) || \
     (ERL_NIF_MAJOR_VERSION == 2 && ERL_NIF_MINOR_VERSION >= 3)
@@ -40,6 +45,7 @@
 static ERL_NIF_TERM ATOM_TRUE;
 static ERL_NIF_TERM ATOM_FALSE;
 static ERL_NIF_TERM ATOM_NULL;
+static ERL_NIF_TERM ATOM_MAX_DEPTH_ERROR;
 
 typedef struct {
     ErlNifEnv* env;
@@ -64,6 +70,11 @@ static __inline int compare_strings(ctx_t*, ErlNifBinary, ErlNifBinary);
 static __inline int compare_lists(int, ctx_t*, ERL_NIF_TERM, ERL_NIF_TERM);
 static __inline int compare_props(int, ctx_t*, ERL_NIF_TERM, ERL_NIF_TERM);
 static __inline UCollator* get_collator();
+
+/* Should match the <<255,255,255,255>> in:
+ *  - src/mango/src/mango_idx_view.hrl#L13
+ *  - src/couch_mrview/src/couch_mrview_util.erl#L40 */
+static const unsigned char max_utf8_marker[]  = {255, 255, 255, 255};
 
 
 UCollator*
@@ -101,7 +112,7 @@ less_json_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
     int result;
 
     ctx.env = env;
-    ctx.error = 0;
+    ctx.error = NO_ERROR;
     ctx.coll = get_collator();
 
     result = less_json(1, &ctx, argv[0], argv[1]);
@@ -116,7 +127,76 @@ less_json_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
      *    and do the comparison in Erlang land. In practice, views keys are
      *    EJSON structures with very little nesting.
      */
-    return ctx.error ? enif_make_badarg(env) : enif_make_int(env, result);
+    if (ctx.error == NO_ERROR) {
+        return enif_make_int(env, result);
+    } else if (ctx.error == MAX_DEPTH_ERROR) {
+        return enif_raise_exception(env, ATOM_MAX_DEPTH_ERROR);
+    } else {
+        return enif_make_badarg(env);
+    }
+}
+
+
+ERL_NIF_TERM
+compare_strings_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
+{
+    ctx_t ctx;
+    int result;
+    ErlNifBinary binA, binB;
+
+    if (!enif_inspect_binary(env, argv[0], &binA)) {
+        return enif_make_badarg(env);
+    }
+
+    if (!enif_inspect_binary(env, argv[1], &binB)) {
+        return enif_make_badarg(env);
+    }
+
+    ctx.env = env;
+    ctx.error = NO_ERROR;
+    ctx.coll = get_collator();
+
+    result = compare_strings(&ctx, binA, binB);
+
+    if (ctx.error == NO_ERROR){
+        return enif_make_int(env, result);
+    } else {
+        return enif_make_badarg(env);
+    }
+}
+
+
+ERL_NIF_TERM
+get_icu_version(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
+{
+    UVersionInfo ver = {0};
+    ERL_NIF_TERM tup[U_MAX_VERSION_LENGTH] = {0};
+    int i;
+
+    u_getVersion(ver);
+
+    for (i = 0; i < U_MAX_VERSION_LENGTH; i++) {
+        tup[i] = enif_make_int(env, ver[i]);
+    }
+
+    return enif_make_tuple_from_array(env, tup, U_MAX_VERSION_LENGTH);
+}
+
+
+ERL_NIF_TERM
+get_uca_version(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
+{
+    UVersionInfo ver = {0};
+    ERL_NIF_TERM tup[U_MAX_VERSION_LENGTH] = {0};
+    int i;
+
+    ucol_getUCAVersion(get_collator(), ver);
+
+    for (i = 0; i < U_MAX_VERSION_LENGTH; i++) {
+        tup[i] = enif_make_int(env, ver[i]);
+    }
+
+    return enif_make_tuple_from_array(env, tup, U_MAX_VERSION_LENGTH);
 }
 
 
@@ -128,6 +208,7 @@ less_json(int depth, ctx_t* ctx, ERL_NIF_TERM a, ERL_NIF_TERM b)
     int aIsNumber, bIsNumber;
     int aIsList, bIsList;
     int aArity, bArity;
+    int aIsProps, bIsProps;
     const ERL_NIF_TERM *aProps, *bProps;
 
     /*
@@ -137,7 +218,7 @@ less_json(int depth, ctx_t* ctx, ERL_NIF_TERM a, ERL_NIF_TERM b)
      * via an exception and do the EJSON comparison in Erlang land.
      */
     if (depth > MAX_DEPTH) {
-        ctx->error = 1;
+        ctx->error = MAX_DEPTH_ERROR;
         return 0;
     }
 
@@ -149,12 +230,12 @@ less_json(int depth, ctx_t* ctx, ERL_NIF_TERM a, ERL_NIF_TERM b)
             int aSortOrd, bSortOrd;
 
             if ((aSortOrd = atom_sort_order(ctx->env, a)) == -1) {
-                ctx->error = 1;
+                ctx->error = BAD_ARG_ERROR;
                 return 0;
             }
 
             if ((bSortOrd = atom_sort_order(ctx->env, b)) == -1) {
-                ctx->error = 1;
+                ctx->error = BAD_ARG_ERROR;
                 return 0;
             }
 
@@ -218,25 +299,37 @@ less_json(int depth, ctx_t* ctx, ERL_NIF_TERM a, ERL_NIF_TERM b)
         return 1;
     }
 
-    if (!enif_get_tuple(ctx->env, a, &aArity, &aProps)) {
-        ctx->error = 1;
-        return 0;
-    }
-    if ((aArity != 1) || !enif_is_list(ctx->env, aProps[0])) {
-        ctx->error = 1;
-        return 0;
+
+    aIsProps = 0;
+    if (enif_get_tuple(ctx->env, a, &aArity, &aProps)) {
+        if (aArity == 1 && enif_is_list(ctx->env, aProps[0])) {
+            aIsProps = 1;
+        }
     }
 
-    if (!enif_get_tuple(ctx->env, b, &bArity, &bProps)) {
-        ctx->error = 1;
-        return 0;
-    }
-    if ((bArity != 1) || !enif_is_list(ctx->env, bProps[0])) {
-        ctx->error = 1;
-        return 0;
+    bIsProps = 0;
+    if (enif_get_tuple(ctx->env, b, &bArity, &bProps)) {
+        if (bArity == 1 && enif_is_list(ctx->env, bProps[0])) {
+            bIsProps = 1;
+        }
     }
 
-    return compare_props(depth, ctx, aProps[0], bProps[0]);
+    if (aIsProps) {
+        if (bIsProps) {
+            return compare_props(depth, ctx, aProps[0], bProps[0]);
+        }
+        return -1;
+    }
+
+    if (bIsProps) {
+        return 1;
+    }
+
+    /*
+     * Both arguments are unsupported data types. Return a badarg error
+     */
+    ctx->error = BAD_ARG_ERROR;
+    return 0;
 }
 
 
@@ -319,20 +412,20 @@ compare_props(int depth, ctx_t* ctx, ERL_NIF_TERM a, ERL_NIF_TERM b)
         }
 
         if (!enif_get_tuple(ctx->env, headA, &aArity, &aKV)) {
-            ctx->error = 1;
+            ctx->error = BAD_ARG_ERROR;
             return 0;
         }
         if ((aArity != 2) || !enif_inspect_binary(ctx->env, aKV[0], &keyA)) {
-            ctx->error = 1;
+            ctx->error = BAD_ARG_ERROR;
             return 0;
         }
 
         if (!enif_get_tuple(ctx->env, headB, &bArity, &bKV)) {
-            ctx->error = 1;
+            ctx->error = BAD_ARG_ERROR;
             return 0;
         }
         if ((bArity != 2) || !enif_inspect_binary(ctx->env, bKV[0], &keyB)) {
-            ctx->error = 1;
+            ctx->error = BAD_ARG_ERROR;
             return 0;
         }
 
@@ -357,11 +450,45 @@ compare_props(int depth, ctx_t* ctx, ERL_NIF_TERM a, ERL_NIF_TERM b)
 
 
 int
+is_max_utf8_marker(ErlNifBinary bin)
+{
+    if (bin.size == sizeof(max_utf8_marker)) {
+        if(memcmp(bin.data, max_utf8_marker, sizeof(max_utf8_marker)) == 0) {
+            return 1;
+        }
+        return 0;
+    }
+    return 0;
+}
+
+
+int
 compare_strings(ctx_t* ctx, ErlNifBinary a, ErlNifBinary b)
 {
     UErrorCode status = U_ZERO_ERROR;
     UCharIterator iterA, iterB;
     int result;
+
+    /* libicu versions earlier than 59 (at least) don't consider the
+     * {255,255,255,255} to be the highest sortable string as CouchDB expects.
+     * While we are still shipping CentOS 7 packages with libicu 50, we should
+     * explicitly check for the marker, later on we can remove the max
+     * logic */
+
+    int a_is_max = is_max_utf8_marker(a);
+    int b_is_max = is_max_utf8_marker(b);
+
+    if(a_is_max && b_is_max) {
+        return 0;
+    }
+
+    if(a_is_max) {
+        return 1;
+    }
+
+    if(b_is_max) {
+        return -1;
+    }
 
     uiter_setUTF8(&iterA, (const char *) a.data, (uint32_t) a.size);
     uiter_setUTF8(&iterB, (const char *) b.data, (uint32_t) b.size);
@@ -369,7 +496,7 @@ compare_strings(ctx_t* ctx, ErlNifBinary a, ErlNifBinary b)
     result = ucol_strcollIter(ctx->coll, &iterA, &iterB, &status);
 
     if (U_FAILURE(status)) {
-        ctx->error = 1;
+        ctx->error = BAD_ARG_ERROR;
         return 0;
     }
 
@@ -409,6 +536,7 @@ on_load(ErlNifEnv* env, void** priv, ERL_NIF_TERM info)
     ATOM_TRUE = enif_make_atom(env, "true");
     ATOM_FALSE = enif_make_atom(env, "false");
     ATOM_NULL = enif_make_atom(env, "null");
+    ATOM_MAX_DEPTH_ERROR = enif_make_atom(env, "max_depth_error");
 
     return 0;
 }
@@ -436,7 +564,10 @@ on_unload(ErlNifEnv* env, void* priv_data)
 
 
 static ErlNifFunc nif_functions[] = {
-    {"less_nif", 2, less_json_nif}
+    {"less_nif", 2, less_json_nif},
+    {"compare_strings_nif", 2, compare_strings_nif},
+    {"get_icu_version", 0, get_icu_version},
+    {"get_uca_version", 0, get_uca_version}
 };
 
 

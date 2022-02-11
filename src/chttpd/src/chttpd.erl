@@ -57,6 +57,9 @@
     buffer_response=false
 }).
 
+-define(DEFAULT_SERVER_OPTIONS, "[{recbuf, undefined}]").
+-define(DEFAULT_SOCKET_OPTIONS, "[{sndbuf, 262144}, {nodelay, true}]").
+
 start_link() ->
     start_link(http).
 start_link(http) ->
@@ -141,7 +144,12 @@ start_link(Name, Options) ->
     end.
 
 get_server_options(Module) ->
-    ServerOptsCfg = config:get(Module, "server_options", "[]"),
+    ServerOptsCfg =
+        case Module of
+            "chttpd" -> config:get(Module,
+                "server_options", ?DEFAULT_SERVER_OPTIONS);
+            _ -> config:get(Module, "server_options", "[]")
+        end,
     {ok, ServerOpts} = couch_util:parse_term(ServerOptsCfg),
     ServerOpts.
 
@@ -159,13 +167,10 @@ handle_request(MochiReq0) ->
 
 handle_request_int(MochiReq) ->
     Begin = os:timestamp(),
-    case config:get("chttpd", "socket_options") of
-    undefined ->
-        ok;
-    SocketOptsCfg ->
-        {ok, SocketOpts} = couch_util:parse_term(SocketOptsCfg),
-        ok = mochiweb_socket:setopts(MochiReq:get(socket), SocketOpts)
-    end,
+    SocketOptsCfg = config:get(
+        "chttpd", "socket_options", ?DEFAULT_SOCKET_OPTIONS),
+    {ok, SocketOpts} = couch_util:parse_term(SocketOptsCfg),
+    ok = mochiweb_socket:setopts(MochiReq:get(socket), SocketOpts),
 
     % for the path, use the raw path with the query string and fragment
     % removed, but URL quoting left intact
@@ -226,7 +231,7 @@ handle_request_int(MochiReq) ->
         original_method = Method1,
         nonce = Nonce,
         method = Method,
-        path_parts = [list_to_binary(chttpd:unquote(Part))
+        path_parts = [list_to_binary(unquote(Part))
                 || Part <- string:tokens(Path, "/")],
         requested_path_parts = [?l2b(unquote(Part))
                 || Part <- string:tokens(RequestedPath, "/")]
@@ -268,16 +273,15 @@ before_request(HttpReq) ->
     try
         chttpd_stats:init(),
         chttpd_plugin:before_request(HttpReq)
-    catch Tag:Error ->
-        {error, catch_error(HttpReq, Tag, Error)}
+    catch ?STACKTRACE(ErrorType, Error, Stack)
+        {error, catch_error(HttpReq, ErrorType, Error, Stack)}
     end.
 
 after_request(HttpReq, HttpResp0) ->
     {ok, HttpResp1} =
         try
             chttpd_plugin:after_request(HttpReq, HttpResp0)
-        catch _Tag:Error ->
-            Stack = erlang:get_stacktrace(),
+        catch ?STACKTRACE(_ErrorType, Error, Stack)
             send_error(HttpReq, {Error, nil, Stack}),
             {ok, HttpResp0#httpd_resp{status = aborted}}
         end,
@@ -310,8 +314,8 @@ process_request(#httpd{mochi_req = MochiReq} = HttpReq) ->
         Response ->
             {HttpReq, Response}
         end
-    catch Tag:Error ->
-        {HttpReq, catch_error(HttpReq, Tag, Error)}
+    catch ?STACKTRACE(ErrorType, Error, Stack)
+        {HttpReq, catch_error(HttpReq, ErrorType, Error, Stack)}
     end.
 
 handle_req_after_auth(HandlerKey, HttpReq) ->
@@ -321,17 +325,17 @@ handle_req_after_auth(HandlerKey, HttpReq) ->
         AuthorizedReq = chttpd_auth:authorize(possibly_hack(HttpReq),
             fun chttpd_auth_request:authorize_request/1),
         {AuthorizedReq, HandlerFun(AuthorizedReq)}
-    catch Tag:Error ->
-        {HttpReq, catch_error(HttpReq, Tag, Error)}
+    catch ?STACKTRACE(ErrorType, Error, Stack)
+        {HttpReq, catch_error(HttpReq, ErrorType, Error, Stack)}
     end.
 
-catch_error(_HttpReq, throw, {http_head_abort, Resp}) ->
+catch_error(_HttpReq, throw, {http_head_abort, Resp}, _Stack) ->
     {ok, Resp};
-catch_error(_HttpReq, throw, {http_abort, Resp, Reason}) ->
+catch_error(_HttpReq, throw, {http_abort, Resp, Reason}, _Stack) ->
     {aborted, Resp, Reason};
-catch_error(HttpReq, throw, {invalid_json, _}) ->
+catch_error(HttpReq, throw, {invalid_json, _}, _Stack) ->
     send_error(HttpReq, {bad_request, "invalid UTF-8 JSON"});
-catch_error(HttpReq, exit, {mochiweb_recv_error, E}) ->
+catch_error(HttpReq, exit, {mochiweb_recv_error, E}, _Stack) ->
     #httpd{
         mochi_req = MochiReq,
         peer = Peer,
@@ -343,16 +347,15 @@ catch_error(HttpReq, exit, {mochiweb_recv_error, E}) ->
         MochiReq:get(raw_path),
         E]),
     exit(normal);
-catch_error(HttpReq, exit, {uri_too_long, _}) ->
+catch_error(HttpReq, exit, {uri_too_long, _}, _Stack) ->
     send_error(HttpReq, request_uri_too_long);
-catch_error(HttpReq, exit, {body_too_large, _}) ->
+catch_error(HttpReq, exit, {body_too_large, _}, _Stack) ->
     send_error(HttpReq, request_entity_too_large);
-catch_error(HttpReq, throw, Error) ->
+catch_error(HttpReq, throw, Error, _Stack) ->
     send_error(HttpReq, Error);
-catch_error(HttpReq, error, database_does_not_exist) ->
+catch_error(HttpReq, error, database_does_not_exist, _Stack) ->
     send_error(HttpReq, database_does_not_exist);
-catch_error(HttpReq, Tag, Error) ->
-    Stack = erlang:get_stacktrace(),
+catch_error(HttpReq, Tag, Error, Stack) ->
     % TODO improve logging and metrics collection for client disconnects
     case {Tag, Error, Stack} of
         {exit, normal, [{mochiweb_request, send, _, _} | _]} ->
@@ -413,13 +416,13 @@ possibly_hack(#httpd{path_parts=[<<"_replicate">>]}=Req) ->
     {Props0} = chttpd:json_body_obj(Req),
     Props1 = fix_uri(Req, Props0, <<"source">>),
     Props2 = fix_uri(Req, Props1, <<"target">>),
-    put(post_body, {Props2}),
-    Req;
+    Req#httpd{req_body={Props2}};
 possibly_hack(Req) ->
     Req.
 
 check_request_uri_length(Uri) ->
-    check_request_uri_length(Uri, config:get("httpd", "max_uri_length")).
+    check_request_uri_length(Uri,
+        chttpd_util:get_chttpd_config("max_uri_length")).
 
 check_request_uri_length(_Uri, undefined) ->
     ok;
@@ -589,7 +592,8 @@ path(#httpd{mochi_req=MochiReq}) ->
     MochiReq:get(path).
 
 absolute_uri(#httpd{mochi_req=MochiReq, absolute_uri = undefined}, Path) ->
-    XHost = config:get("httpd", "x_forwarded_host", "X-Forwarded-Host"),
+    XHost = chttpd_util:get_chttpd_config(
+        "x_forwarded_host", "X-Forwarded-Host"),
     Host = case MochiReq:get_header_value(XHost) of
         undefined ->
             case MochiReq:get_header_value("Host") of
@@ -604,12 +608,12 @@ absolute_uri(#httpd{mochi_req=MochiReq, absolute_uri = undefined}, Path) ->
             end;
         Value -> Value
     end,
-    XSsl = config:get("httpd", "x_forwarded_ssl", "X-Forwarded-Ssl"),
+    XSsl = chttpd_util:get_chttpd_config("x_forwarded_ssl", "X-Forwarded-Ssl"),
     Scheme = case MochiReq:get_header_value(XSsl) of
         "on" -> "https";
         _ ->
-            XProto = config:get("httpd", "x_forwarded_proto",
-                "X-Forwarded-Proto"),
+            XProto = chttpd_util:get_chttpd_config(
+                "x_forwarded_proto", "X-Forwarded-Proto"),
             case MochiReq:get_header_value(XProto) of
                 % Restrict to "https" and "http" schemes only
                 "https" -> "https";
@@ -627,7 +631,10 @@ absolute_uri(#httpd{absolute_uri = URI}, Path) ->
     URI ++ Path.
 
 unquote(UrlEncodedString) ->
-    mochiweb_util:unquote(UrlEncodedString).
+    case config:get_boolean("chttpd", "decode_plus_to_space", true) of
+        true -> mochiweb_util:unquote(UrlEncodedString);
+        false -> mochiweb_util:unquote_path(UrlEncodedString)
+    end.
 
 quote(UrlDecodedString) ->
     mochiweb_util:quote_plus(UrlDecodedString).
@@ -651,8 +658,8 @@ body(#httpd{mochi_req=MochiReq, req_body=ReqBody}) ->
     case ReqBody of
         undefined ->
             % Maximum size of document PUT request body (4GB)
-            MaxSize =  config:get_integer("httpd", "max_http_request_size",
-                4294967296),
+            MaxSize = chttpd_util:get_chttpd_config_integer(
+                "max_http_request_size", 4294967296),
             Begin = os:timestamp(),
             try
                 MochiReq:recv_body(MaxSize)
@@ -667,13 +674,16 @@ body(#httpd{mochi_req=MochiReq, req_body=ReqBody}) ->
 validate_ctype(Req, Ctype) ->
     couch_httpd:validate_ctype(Req, Ctype).
 
-json_body(Httpd) ->
+json_body(#httpd{req_body=undefined} = Httpd) ->
     case body(Httpd) of
         undefined ->
             throw({bad_request, "Missing request body"});
         Body ->
             ?JSON_DECODE(maybe_decompress(Httpd, Body))
-    end.
+    end;
+
+json_body(#httpd{req_body=ReqBody}) ->
+    ReqBody.
 
 json_body_obj(Httpd) ->
     case json_body(Httpd) of
@@ -998,6 +1008,8 @@ error_info({service_unavailable, Reason}) ->
     {503, <<"service unavailable">>, Reason};
 error_info({timeout, _Reason}) ->
     error_info(timeout);
+error_info({'EXIT', {Error, _Stack}}) ->
+    error_info(Error);
 error_info({Error, null}) ->
     error_info(Error);
 error_info({_Error, _Reason} = Error) ->
@@ -1026,20 +1038,22 @@ error_headers(#httpd{mochi_req=MochiReq}=Req, 401=Code, ErrorStr, ReasonStr) ->
     % this is where the basic auth popup is triggered
     case MochiReq:get_header_value("X-CouchDB-WWW-Authenticate") of
     undefined ->
-        case config:get("httpd", "WWW-Authenticate", undefined) of
+        case chttpd_util:get_chttpd_config("WWW-Authenticate") of
         undefined ->
             % If the client is a browser and the basic auth popup isn't turned on
             % redirect to the session page.
             case ErrorStr of
             <<"unauthorized">> ->
-                case config:get("couch_httpd_auth", "authentication_redirect", undefined) of
+                case chttpd_util:get_chttpd_auth_config(
+                    "authentication_redirect", "/_utils/session.html") of
                 undefined -> {Code, []};
                 AuthRedirect ->
-                    case config:get("couch_httpd_auth", "require_valid_user", "false") of
-                    "true" ->
+                    case chttpd_util:get_chttpd_auth_config_boolean(
+                        "require_valid_user", false) of
+                    true ->
                         % send the browser popup header no matter what if we are require_valid_user
                         {Code, [{"WWW-Authenticate", "Basic realm=\"server\""}]};
-                    _False ->
+                    false ->
                         case MochiReq:accepts_content_type("application/json") of
                         true ->
                             {Code, []};
@@ -1224,15 +1238,16 @@ stack_hash(Stack) ->
 %% this value to 0 to restore the older behavior of sending each row in a
 %% dedicated chunk.
 chunked_response_buffer_size() ->
-    config:get_integer("httpd", "chunked_response_buffer", 1490).
+    chttpd_util:get_chttpd_config_integer("chunked_response_buffer", 1490).
 
 basic_headers(Req, Headers0) ->
     Headers = Headers0
         ++ server_header()
         ++ couch_httpd_auth:cookie_auth_header(Req, Headers0),
     Headers1 = chttpd_cors:headers(Req, Headers),
-	Headers2 = chttpd_xframe_options:header(Req, Headers1),
-    chttpd_prefer_header:maybe_return_minimal(Req, Headers2).
+    Headers2 = chttpd_xframe_options:header(Req, Headers1),
+    Headers3 = [reqid(), timing() | Headers2],
+    chttpd_prefer_header:maybe_return_minimal(Req, Headers3).
 
 handle_response(Req0, Code0, Headers0, Args0, Type) ->
     {ok, {Req1, Code1, Headers1, Args1}} =

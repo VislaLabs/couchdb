@@ -165,7 +165,7 @@ enable_cluster_int(Options, false) ->
     couch_log:debug("Enable Cluster: ~p~n", [Options]).
 
 set_admin(Username, Password) ->
-    config:set("admins", binary_to_list(Username), binary_to_list(Password)).
+    config:set("admins", binary_to_list(Username), binary_to_list(Password), #{sensitive => true}).
 
 setup_node(NewCredentials, NewBindAddress, NodeCount, Port) ->
     case NewCredentials of
@@ -198,6 +198,9 @@ setup_node(NewCredentials, NewBindAddress, NodeCount, Port) ->
 
 
 finish_cluster(Options) ->
+    % ensure that uuid is set
+    couch_server:get_uuid(),
+
     ok = wait_connected(),
     ok = sync_admins(),
     ok = sync_uuid(),
@@ -251,8 +254,8 @@ sync_uuid() ->
     sync_config("couchdb", "uuid", Uuid).
 
 sync_auth_secret() ->
-    Secret = config:get("couch_httpd_auth", "secret"),
-    sync_config("couch_httpd_auth", "secret", Secret).
+    Secret = config:get("chttpd_auth", "secret"),
+    sync_config("chttpd_auth", "secret", Secret).
 
 
 sync_config(Section, Key, Value) ->

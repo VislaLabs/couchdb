@@ -33,15 +33,16 @@
 
 -export([jwt_authentication_handler/1]).
 
--import(couch_httpd, [header_value/2, send_json/2,send_json/4, send_method_not_allowed/2]).
+-import(couch_httpd, [header_value/2, send_json/2, send_json/4, send_method_not_allowed/2, maybe_decompress/2]).
 
 -compile({no_auto_import,[integer_to_binary/1, integer_to_binary/2]}).
 
 party_mode_handler(Req) ->
-    case config:get("couch_httpd_auth", "require_valid_user", "false") of
-    "true" ->
+    case chttpd_util:get_chttpd_auth_config_boolean(
+        "require_valid_user", false) of
+    true ->
         throw({unauthorized, <<"Authentication required.">>});
-    "false" ->
+    false ->
         Req#httpd{user_ctx=#user_ctx{}}
     end.
 
@@ -116,11 +117,12 @@ default_authentication_handler(Req, AuthModule) ->
         true ->
             Req;
         false ->
-            case config:get("couch_httpd_auth", "require_valid_user", "false") of
-                "true" -> Req;
+            case chttpd_util:get_chttpd_auth_config_boolean(
+                "require_valid_user", false) of
+                true -> Req;
                 % If no admins, and no user required, then everyone is admin!
                 % Yay, admin party!
-                _ -> Req#httpd{user_ctx=?ADMIN_USER}
+                false -> Req#httpd{user_ctx=?ADMIN_USER}
             end
         end
     end.
@@ -155,12 +157,12 @@ proxy_authentification_handler(Req) ->
     proxy_authentication_handler(Req).
     
 proxy_auth_user(Req) ->
-    XHeaderUserName = config:get("couch_httpd_auth", "x_auth_username",
-                                "X-Auth-CouchDB-UserName"),
-    XHeaderRoles = config:get("couch_httpd_auth", "x_auth_roles",
-                                "X-Auth-CouchDB-Roles"),
-    XHeaderToken = config:get("couch_httpd_auth", "x_auth_token",
-                                "X-Auth-CouchDB-Token"),
+    XHeaderUserName = chttpd_util:get_chttpd_auth_config(
+        "x_auth_username", "X-Auth-CouchDB-UserName"),
+    XHeaderRoles = chttpd_util:get_chttpd_auth_config(
+        "x_auth_roles", "X-Auth-CouchDB-Roles"),
+    XHeaderToken = chttpd_util:get_chttpd_auth_config(
+        "x_auth_token", "X-Auth-CouchDB-Token"),
     case header_value(Req, XHeaderUserName) of
         undefined -> nil;
         UserName ->
@@ -169,13 +171,14 @@ proxy_auth_user(Req) ->
                 Else ->
                     [?l2b(R) || R <- string:tokens(Else, ",")]
             end,
-            case config:get("couch_httpd_auth", "proxy_use_secret", "false") of
-                "true" ->
-                    case config:get("couch_httpd_auth", "secret", undefined) of
+            case chttpd_util:get_chttpd_auth_config_boolean(
+                "proxy_use_secret", false) of
+                true ->
+                    case chttpd_util:get_chttpd_auth_config("secret") of
                         undefined ->
                             Req#httpd{user_ctx=#user_ctx{name=?l2b(UserName), roles=Roles}};
                         Secret ->
-                            ExpectedToken = couch_util:to_hex(crypto:hmac(sha, Secret, UserName)),
+                            ExpectedToken = couch_util:to_hex(couch_util:hmac(sha, Secret, UserName)),
                             case header_value(Req, XHeaderToken) of
                                 Token when Token == ExpectedToken ->
                                     Req#httpd{user_ctx=#user_ctx{name=?l2b(UserName),
@@ -183,7 +186,7 @@ proxy_auth_user(Req) ->
                                 _ -> nil
                             end
                     end;
-                _ ->
+                false ->
                     Req#httpd{user_ctx=#user_ctx{name=?l2b(UserName), roles=Roles}}
             end
     end.
@@ -198,7 +201,7 @@ jwt_authentication_handler(Req) ->
                         false -> throw({unauthorized, <<"Token missing sub claim.">>});
                         {_, User} -> Req#httpd{user_ctx=#user_ctx{
                             name = User,
-                            roles = couch_util:get_value(<<"_couchdb.roles">>, Claims, [])
+                            roles = couch_util:get_value(?l2b(config:get("jwt_auth", "roles_claim_name", "_couchdb.roles")), Claims, [])
                         }}
                     end;
                 {error, Reason} ->
@@ -209,12 +212,21 @@ jwt_authentication_handler(Req) ->
 
 get_configured_claims() ->
     Claims = config:get("jwt_auth", "required_claims", ""),
-    case re:split(Claims, "\s*,\s*", [{return, list}]) of
-        [[]] ->
-            []; %% if required_claims is the empty string.
-        List ->
-            [list_to_existing_atom(C) || C <- List]
+    Re = "((?<key1>[a-z]+)|{(?<key2>[a-z]+)\s*,\s*\"(?<val>[^\"]+)\"})",
+    case re:run(Claims, Re, [global, {capture,  [key1, key2, val], binary}]) of
+        nomatch when Claims /= "" ->
+            couch_log:error("[jwt_auth] required_claims is set to an invalid value.", []),
+            throw({misconfigured_server, <<"JWT is not configured correctly">>});
+        nomatch ->
+            [];
+        {match, Matches} ->
+            lists:map(fun to_claim/1, Matches)
     end.
+
+to_claim([Key, <<>>, <<>>]) ->
+    binary_to_atom(Key, latin1);
+to_claim([<<>>, Key, Value]) ->
+    {binary_to_atom(Key, latin1), Value}.
 
 cookie_authentication_handler(Req) ->
     cookie_authentication_handler(Req, couch_auth_cache).
@@ -235,7 +247,7 @@ cookie_authentication_handler(#httpd{mochi_req=MochiReq}=Req, AuthModule) ->
         end,
         % Verify expiry and hash
         CurrentTime = make_cookie_time(),
-        case config:get("couch_httpd_auth", "secret", undefined) of
+        case chttpd_util:get_chttpd_auth_config("secret") of
         undefined ->
             couch_log:debug("cookie auth secret is not set",[]),
             Req;
@@ -246,10 +258,10 @@ cookie_authentication_handler(#httpd{mochi_req=MochiReq}=Req, AuthModule) ->
             {ok, UserProps, _AuthCtx} ->
                 UserSalt = couch_util:get_value(<<"salt">>, UserProps, <<"">>),
                 FullSecret = <<Secret/binary, UserSalt/binary>>,
-                ExpectedHash = crypto:hmac(sha, FullSecret, User ++ ":" ++ TimeStr),
+                ExpectedHash = couch_util:hmac(sha, FullSecret, User ++ ":" ++ TimeStr),
                 Hash = ?l2b(HashStr),
-                Timeout = list_to_integer(
-                    config:get("couch_httpd_auth", "timeout", "600")),
+                Timeout = chttpd_util:get_chttpd_auth_config_integer(
+                    "timeout", 600),
                 couch_log:debug("timeout ~p", [Timeout]),
                 case (catch erlang:list_to_integer(TimeStr, 16)) of
                     TimeStamp when CurrentTime < TimeStamp + Timeout ->
@@ -294,16 +306,16 @@ cookie_auth_header(_Req, _Headers) -> [].
 
 cookie_auth_cookie(Req, User, Secret, TimeStamp) ->
     SessionData = User ++ ":" ++ erlang:integer_to_list(TimeStamp, 16),
-    Hash = crypto:hmac(sha, Secret, SessionData),
+    Hash = couch_util:hmac(sha, Secret, SessionData),
     mochiweb_cookies:cookie("AuthSession",
         couch_util:encodeBase64Url(SessionData ++ ":" ++ ?b2l(Hash)),
         [{path, "/"}] ++ cookie_scheme(Req) ++ max_age() ++ cookie_domain() ++ same_site()).
 
 ensure_cookie_auth_secret() ->
-    case config:get("couch_httpd_auth", "secret", undefined) of
+    case chttpd_util:get_chttpd_auth_config("secret") of
         undefined ->
             NewSecret = ?b2l(couch_uuids:random()),
-            config:set("couch_httpd_auth", "secret", NewSecret),
+            config:set("chttpd_auth", "secret", NewSecret),
             NewSecret;
         Secret -> Secret
     end.
@@ -320,7 +332,7 @@ handle_session_req(#httpd{method='POST', mochi_req=MochiReq}=Req, AuthModule) ->
         "application/x-www-form-urlencoded" ++ _ ->
             mochiweb_util:parse_qs(ReqBody);
         "application/json" ++ _ ->
-            {Pairs} = ?JSON_DECODE(ReqBody),
+            {Pairs} = ?JSON_DECODE(maybe_decompress(Req, ReqBody)),
             lists:map(fun({Key, Value}) ->
               {?b2l(Key), ?b2l(Value)}
             end, Pairs);
@@ -440,8 +452,8 @@ authenticate(Pass, UserProps) ->
     couch_passwords:verify(PasswordHash, ExpectedHash).
 
 verify_iterations(Iterations) when is_integer(Iterations) ->
-    Min = list_to_integer(config:get("couch_httpd_auth", "min_iterations", "1")),
-    Max = list_to_integer(config:get("couch_httpd_auth", "max_iterations", "1000000000")),
+    Min = chttpd_util:get_chttpd_auth_config_integer("min_iterations", 1),
+    Max = chttpd_util:get_chttpd_auth_config_integer("max_iterations", 1000000000),
     case Iterations < Min of
         true ->
             throw({forbidden, <<"Iteration count is too low for this server">>});
@@ -467,17 +479,18 @@ cookie_scheme(#httpd{mochi_req=MochiReq}) ->
     end.
 
 max_age() ->
-    case config:get("couch_httpd_auth", "allow_persistent_cookies", "true") of
-        "false" ->
+    case chttpd_util:get_chttpd_auth_config_boolean(
+        "allow_persistent_cookies", true) of
+        false ->
             [];
-        "true" ->
-            Timeout = list_to_integer(
-                config:get("couch_httpd_auth", "timeout", "600")),
+        true ->
+            Timeout = chttpd_util:get_chttpd_auth_config_integer(
+                "timeout", 600),
             [{max_age, Timeout}]
     end.
 
 cookie_domain() ->
-    Domain = config:get("couch_httpd_auth", "cookie_domain", ""),
+    Domain = chttpd_util:get_chttpd_auth_config("cookie_domain", ""),
     case Domain of
         "" -> [];
         _ -> [{domain, Domain}]
@@ -485,7 +498,7 @@ cookie_domain() ->
 
 
 same_site() ->
-    SameSite = config:get("couch_httpd_auth", "same_site", ""),
+    SameSite = chttpd_util:get_chttpd_auth_config("same_site", ""),
     case string:to_lower(SameSite) of
         "" -> [];
         "none" -> [{same_site, none}];

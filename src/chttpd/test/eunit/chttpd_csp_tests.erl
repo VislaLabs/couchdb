@@ -67,60 +67,52 @@ csp_test_() ->
 plain_docs_not_sandboxed(DbName) ->
     DbUrl = base_url() ++ "/" ++ DbName,
     Url = DbUrl ++ "/" ++ ?DOC1,
-    config:set("csp", "attachments_enable", "true", false),
     ?assertEqual({200, false}, req(get, ?ACC, Url)),
-    config:delete("csp", "attachments_enable", false),
+    config:set("csp", "attachments_enable", "false", false),
     ?assertEqual({200, false}, req(get, ?ACC, Url)).
 
 plain_ddocs_not_sandboxed(DbName) ->
     DbUrl = base_url() ++ "/" ++ DbName,
     Url = DbUrl ++ "/" ++ ?DDOC1,
-    config:set("csp", "attachments_enable", "true", false),
     ?assertEqual({200, false}, req(get, ?ACC, Url)),
-    config:delete("csp", "attachments_enable", false),
+    config:set("csp", "attachments_enable", "false", false),
     ?assertEqual({200, false}, req(get, ?ACC, Url)).
 
 local_docs_not_sandboxed(DbName) ->
     DbUrl = base_url() ++ "/" ++ DbName,
     Url = DbUrl ++ "/" ++ ?LDOC1,
-    config:set("csp", "attachments_enable", "true", false),
     ?assertEqual({200, false}, req(get, ?ACC, Url)),
-    config:delete("csp", "attachments_enable", false),
+    config:set("csp", "attachments_enable", "false", false),
     ?assertEqual({200, false}, req(get, ?ACC, Url)).
 
 sandbox_doc_attachments(DbName) ->
     DbUrl = base_url() ++ "/" ++ DbName,
     Url = DbUrl ++ "/" ++ ?DOC1 ++ "/" ++ ?ATT1,
-    ?assertEqual({200, false}, req(get, ?ACC, Url)),
-    config:set("csp", "attachments_enable", "true", false),
     ?assertEqual({200, true}, req(get, ?ACC, Url)),
-    config:delete("csp", "attachments_enable", false),
+    config:set("csp", "attachments_enable", "false", false),
     ?assertEqual({200, false}, req(get, ?ACC, Url)).
 
 sandbox_ddoc_attachments(DbName) ->
     DbUrl = base_url() ++ "/" ++ DbName,
     Url = DbUrl ++ "/" ++ ?DDOC1 ++ "/" ++ ?ATT1,
-    config:set("csp", "attachments_enable", "true", false),
     ?assertEqual({200, true}, req(get, ?ACC, Url)),
-    config:delete("csp", "attachments_enable", false),
+    config:set("csp", "attachments_enable", "false", false),
     ?assertEqual({200, false}, req(get, ?ACC, Url)).
 
 sandbox_shows(DbName) ->
     DbUrl = base_url() ++ "/" ++ DbName,
     DDocUrl =  DbUrl ++ "/" ++ ?DDOC1,
     Url = DDocUrl ++ "/_show/" ++ ?SHOW1 ++ "/" ++ ?DOC1,
-    config:set("csp", "showlist_enable", "true", false),
     ?assertEqual({200, true}, req(get, ?ACC, Url)),
-    config:delete("csp", "showlist_enable", false),
+    config:set("csp", "showlist_enable", "false", false),
     ?assertEqual({200, false}, req(get, ?ACC, Url)).
 
 sandbox_lists(DbName) ->
     DbUrl = base_url() ++ "/" ++ DbName,
     DDocUrl =  DbUrl ++ "/" ++ ?DDOC1,
     Url = DDocUrl ++ "/_list/" ++ ?LIST1 ++ "/" ++ ?VIEW1,
-    config:set("csp", "showlist_enable", "true", false),
     ?assertEqual({200, true}, req(get, ?ACC, Url)),
-    config:delete("csp", "showlist_enable", false),
+    config:set("csp", "showlist_enable", "false", false),
     ?assertEqual({200, false}, req(get, ?ACC, Url)).
 
 

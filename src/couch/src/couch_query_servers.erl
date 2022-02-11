@@ -491,13 +491,25 @@ filter_docs(Req, Db, DDoc, FName, Docs) ->
         {json_req, JsonObj} ->
             JsonObj;
         #httpd{} = HttpReq ->
-            couch_httpd_external:json_req_obj(HttpReq, Db)
+            chttpd_external:json_req_obj(HttpReq, Db)
     end,
     Options = json_doc_options(),
     JsonDocs = [json_doc(Doc, Options) || Doc <- Docs],
+    try
+        {ok, filter_docs_int(DDoc, FName, JsonReq, JsonDocs)}
+    catch
+        throw:{os_process_error,{exit_status,1}} ->
+            %% batch used too much memory, retry sequentially.
+            Fun = fun(JsonDoc) ->
+                filter_docs_int(DDoc, FName, JsonReq, [JsonDoc])
+            end,
+            {ok, lists:flatmap(Fun, JsonDocs)}
+    end.
+
+filter_docs_int(DDoc, FName, JsonReq, JsonDocs) ->
     [true, Passes] = ddoc_prompt(DDoc, [<<"filters">>, FName],
         [JsonDocs, JsonReq]),
-    {ok, Passes}.
+    Passes.
 
 ddoc_proc_prompt({Proc, DDocId}, FunPath, Args) ->
     proc_prompt(Proc, [<<"ddoc">>, DDocId, FunPath, Args]).
@@ -511,9 +523,13 @@ with_ddoc_proc(#doc{id=DDocId,revs={Start, [DiskRev|_]}}=DDoc, Fun) ->
     Rev = couch_doc:rev_to_str({Start, DiskRev}),
     DDocKey = {DDocId, Rev},
     Proc = get_ddoc_process(DDoc, DDocKey),
-    try Fun({Proc, DDocId})
-    after
-        ok = ret_os_process(Proc)
+    try Fun({Proc, DDocId}) of
+        Resp ->
+            ok = ret_os_process(Proc),
+            Resp
+    catch ?STACKTRACE(Tag, Err, Stack)
+        catch proc_stop(Proc),
+        erlang:raise(Tag, Err, Stack)
     end.
 
 proc_prompt(Proc, Args) ->
@@ -607,7 +623,7 @@ proc_set_timeout(Proc, Timeout) ->
     apply(Mod, Func, [Proc#proc.pid, Timeout]).
 
 get_os_process_timeout() ->
-    list_to_integer(config:get("couchdb", "os_process_timeout", "5000")).
+    config:get_integer("couchdb", "os_process_timeout", 5000).
 
 get_ddoc_process(#doc{} = DDoc, DDocKey) ->
     % remove this case statement

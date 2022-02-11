@@ -28,7 +28,7 @@
 % Documents
 -export([open_doc/3, open_revs/4, get_doc_info/3, get_full_doc_info/3,
     get_missing_revs/2, get_missing_revs/3, update_doc/3, update_docs/3,
-    purge_docs/3, att_receiver/2]).
+    purge_docs/3, att_receiver/3]).
 
 % Views
 -export([all_docs/4, all_docs/5, changes/4, query_view/3, query_view/4,
@@ -37,7 +37,7 @@
 % miscellany
 -export([design_docs/1, reset_validation_funs/1, cleanup_index_files/0,
     cleanup_index_files/1, cleanup_index_files_all_nodes/1, dbname/1,
-    inactive_index_files/1]).
+    inactive_index_files/1, db_uuids/1]).
 
 -include_lib("fabric/include/fabric.hrl").
 
@@ -324,11 +324,11 @@ purge_docs(DbName, IdsRevs, Options) when is_list(IdsRevs) ->
 %%      returns a fabric attachment receiver context tuple
 %%      with the spawned middleman process, an empty binary,
 %%      or exits with an error tuple {Error, Arg}
--spec att_receiver(#httpd{}, Length :: undefined | chunked | pos_integer() |
+-spec att_receiver(#httpd{}, dbname(), Length :: undefined | chunked | pos_integer() |
         {unknown_transfer_encoding, any()}) ->
     {fabric_attachment_receiver, pid(), chunked | pos_integer()} | binary().
-att_receiver(Req, Length) ->
-    fabric_doc_atts:receiver(Req, Length).
+att_receiver(Req, DbName, Length) ->
+    fabric_doc_atts:receiver(Req, DbName, Length).
 
 %% @equiv all_docs(DbName, [], Callback, Acc0, QueryArgs)
 all_docs(DbName, Callback, Acc, QueryArgs) ->
@@ -504,9 +504,17 @@ cleanup_index_files() ->
 %% @doc clean up index files for a specific db
 -spec cleanup_index_files(dbname()) -> ok.
 cleanup_index_files(DbName) ->
-    lists:foreach(fun(File) ->
-        file:delete(File)
-    end, inactive_index_files(DbName)).
+    try lists:foreach(
+        fun(File) ->
+            file:delete(File)
+        end, inactive_index_files(DbName))
+    catch
+        error:Error ->
+            couch_log:error(
+                "~p:cleanup_index_files. Error: ~p",
+                [?MODULE, Error]),
+            ok
+    end.
 
 %% @doc inactive index files for a specific db
 -spec inactive_index_files(dbname()) -> ok.
@@ -550,6 +558,11 @@ dbname(Db) ->
     catch error:badarg ->
         erlang:error({illegal_database_name, Db})
     end.
+
+%% @doc get db shard uuids
+-spec db_uuids(dbname())  -> map().
+db_uuids(DbName) ->
+    fabric_db_uuids:go(dbname(DbName)).
 
 name(Thing) ->
     couch_util:to_binary(Thing).

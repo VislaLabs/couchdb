@@ -82,7 +82,7 @@ handle_task_status_req(Req) ->
 
 
 handle_uuids_req(#httpd{method='GET'}=Req) ->
-    Max = list_to_integer(config:get("uuids","max_count","1000")),
+    Max = config:get_integer("uuids","max_count", 1000),
     Count = try list_to_integer(couch_httpd:qs_value(Req, "count", "1")) of
         N when N > Max ->
             throw({bad_request, <<"count parameter too large">>});
@@ -157,7 +157,7 @@ handle_config_req(#httpd{method=Method, path_parts=[_, Section, Key]}=Req)
     ok = couch_httpd:verify_is_server_admin(Req),
     couch_util:check_config_blacklist(Section),
     Persist = couch_httpd:header_value(Req, "X-Couch-Persist") /= "false",
-    case config:get("httpd", "config_whitelist", undefined) of
+    case chttpd_util:get_chttpd_config("config_whitelist") of
         undefined ->
             % No whitelist; allow all changes.
             handle_approved_config_req(Req, Persist);
@@ -167,7 +167,7 @@ handle_config_req(#httpd{method=Method, path_parts=[_, Section, Key]}=Req)
             % Erlang term. To intentionally lock down the whitelist, supply a
             % well-formed list which does not include the whitelist config
             % variable itself.
-            FallbackWhitelist = [{<<"httpd">>, <<"config_whitelist">>}],
+            FallbackWhitelist = [{<<"chttpd">>, <<"config_whitelist">>}],
 
             Whitelist = case couch_util:parse_term(WhitelistValue) of
                 {ok, Value} when is_list(Value) ->

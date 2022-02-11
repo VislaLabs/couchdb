@@ -14,14 +14,14 @@
 
 -export([priv_dir/0, normpath/1, fold_files/5]).
 -export([should_flush/0, should_flush/1, to_existing_atom/1]).
--export([rand32/0, implode/2, collate/2, collate/3]).
+-export([rand32/0, implode/2]).
 -export([abs_pathname/1,abs_pathname/2, trim/1, drop_dot_couch_ext/1]).
 -export([encodeBase64Url/1, decodeBase64Url/1]).
 -export([validate_utf8/1, to_hex/1, parse_term/1, dict_find/3]).
 -export([get_nested_json_value/2, json_user_ctx/1]).
 -export([proplist_apply_field/2, json_apply_field/2]).
 -export([to_binary/1, to_integer/1, to_list/1, url_encode/1]).
--export([json_encode/1, json_decode/1]).
+-export([json_encode/1, json_decode/1, json_decode/2]).
 -export([verify/2,simple_call/2,shutdown_sync/1]).
 -export([get_value/2, get_value/3]).
 -export([reorder_results/2]).
@@ -41,6 +41,7 @@
 -export([check_md5/2]).
 -export([set_mqd_off_heap/1]).
 -export([set_process_priority/2]).
+-export([hmac/3]).
 
 -include_lib("couch/include/couch_db.hrl").
 
@@ -386,33 +387,6 @@ implode([H|T], Sep, Acc) ->
     implode(T, Sep, [Sep,H|Acc]).
 
 
-drv_port() ->
-    case get(couch_drv_port) of
-    undefined ->
-        Port = open_port({spawn, "couch_icu_driver"}, []),
-        put(couch_drv_port, Port),
-        Port;
-    Port ->
-        Port
-    end.
-
-collate(A, B) ->
-    collate(A, B, []).
-
-collate(A, B, Options) when is_binary(A), is_binary(B) ->
-    Operation =
-    case lists:member(nocase, Options) of
-        true -> 1; % Case insensitive
-        false -> 0 % Case sensitive
-    end,
-    SizeA = byte_size(A),
-    SizeB = byte_size(B),
-    Bin = <<SizeA:32/native, A/binary, SizeB:32/native, B/binary>>,
-    [Result] = erlang:port_control(drv_port(), Operation, Bin),
-    % Result is 0 for lt, 1 for eq and 2 for gt. Subtract 1 to return the
-    % expected typical -1, 0, 1
-    Result - 1.
-
 should_flush() ->
     should_flush(?FLUSH_MAX_MEM).
 
@@ -499,8 +473,11 @@ json_encode(V) ->
     jiffy:encode(V, [force_utf8]).
 
 json_decode(V) ->
+    json_decode(V, []).
+
+json_decode(V, Opts) ->
     try
-        jiffy:decode(V, [dedupe_keys])
+        jiffy:decode(V, [dedupe_keys | Opts])
     catch
         error:Error ->
             throw({invalid_json, Error})
@@ -772,3 +749,28 @@ check_config_blacklist(Section) ->
     _ ->
         ok
     end.
+
+
+-ifdef(OTP_RELEASE).
+
+-if(?OTP_RELEASE >= 22).
+
+% OTP >= 22
+hmac(Alg, Key, Message) ->
+    crypto:mac(hmac, Alg, Key, Message).
+
+-else.
+
+% OTP >= 21, < 22
+hmac(Alg, Key, Message) ->
+    crypto:hmac(Alg, Key, Message).
+
+-endif. % -if(?OTP_RELEASE >= 22)
+
+-else.
+
+% OTP < 21
+hmac(Alg, Key, Message) ->
+    crypto:hmac(Alg, Key, Message).
+
+-endif. % -ifdef(OTP_RELEASE)

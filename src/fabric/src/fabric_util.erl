@@ -23,6 +23,9 @@
 -export([validate_all_docs_args/2, validate_args/3]).
 -export([upgrade_mrargs/1]).
 -export([worker_ranges/1]).
+-export([get_uuid_prefix_len/0]).
+-export([isolate/1, isolate/2]).
+
 
 -compile({inline, [{doc_id_and_rev,1}]}).
 
@@ -104,8 +107,12 @@ get_db(DbName, Options) ->
     % suppress shards from down nodes
     Nodes = [node()|erlang:nodes()],
     Live = [S || #shard{node = N} = S <- Shards, lists:member(N, Nodes)],
-    Factor = list_to_integer(config:get("fabric", "shard_timeout_factor", "2")),
-    get_shard(Live, [{create_if_missing, true} | Options], 100, Factor).
+    % Only accept factors > 1, otherwise our math breaks further down
+    Factor = max(2, config:get_integer("fabric", "shard_timeout_factor", 2)),
+    MinTimeout = config:get_integer("fabric", "shard_timeout_min_msec", 100),
+    MaxTimeout = request_timeout(),
+    Timeout = get_db_timeout(length(Live), Factor, MinTimeout, MaxTimeout),
+    get_shard(Live, Options, Timeout, Factor).
 
 get_shard([], _Opts, _Timeout, _Factor) ->
     erlang:error({internal_server_error, "No DB shards could be opened."});
@@ -130,6 +137,29 @@ get_shard([#shard{node = Node, name = Name} | Rest], Opts, Timeout, Factor) ->
     after
         rexi_monitor:stop(Mon)
     end.
+
+get_db_timeout(N, Factor, MinTimeout, infinity) ->
+    % MaxTimeout may be infinity so we just use the largest Erlang small int to
+    % avoid blowing up the arithmetic
+    get_db_timeout(N, Factor, MinTimeout, 1 bsl 59);
+get_db_timeout(N, Factor, MinTimeout, MaxTimeout) ->
+    %
+    % The progression of timeouts forms a geometric series:
+    %
+    %     MaxTimeout = T + T*F + T*F^2 + T*F^3 ...
+    %
+    % Where T is the initial timeout and F is the factor. The formula for
+    % the sum is:
+    %
+    %     Sum[T * F^I, I <- 0..N] = T * (1 - F^(N + 1)) / (1 - F)
+    %
+    % Then, for a given sum and factor we can calculate the initial timeout T:
+    %
+    %     T = Sum / ((1 - F^(N+1)) / (1 - F))
+    %
+    Timeout = MaxTimeout / ((1 - math:pow(Factor, N + 1)) / (1 - Factor)),
+    % Apply a minimum timeout value
+    max(MinTimeout, trunc(Timeout)).
 
 error_info({{timeout, _} = Error, _Stack}) ->
     Error;
@@ -345,3 +375,97 @@ worker_ranges(Workers) ->
         [{X, Y} | Acc]
     end, [], Workers),
     lists:usort(Ranges).
+
+
+get_uuid_prefix_len() ->
+    config:get_integer("fabric", "uuid_prefix_len", 7).
+
+
+% If we issue multiple fabric calls from the same process we have to isolate
+% them so in case of error they don't pollute the processes dictionary or the
+% mailbox
+
+isolate(Fun) ->
+    isolate(Fun, infinity).
+
+
+isolate(Fun, Timeout) ->
+    {Pid, Ref} = erlang:spawn_monitor(fun() -> exit(do_isolate(Fun)) end),
+    receive
+        {'DOWN', Ref, _, _, {'$isolres', Res}} ->
+            Res;
+        {'DOWN', Ref, _, _, {'$isolerr', Tag, Reason, Stack}} ->
+            erlang:raise(Tag, Reason, Stack)
+    after Timeout ->
+        erlang:demonitor(Ref, [flush]),
+        exit(Pid, kill),
+        erlang:error(timeout)
+    end.
+
+
+% OTP_RELEASE is defined in OTP 21+ only
+-ifdef(OTP_RELEASE).
+
+
+do_isolate(Fun) ->
+    try
+        {'$isolres', Fun()}
+    catch Tag:Reason:Stack ->
+        {'$isolerr', Tag, Reason, Stack}
+    end.
+
+
+-else.
+
+
+do_isolate(Fun) ->
+    try
+        {'$isolres', Fun()}
+    catch ?STACKTRACE(Tag, Reason, Stack)
+        {'$isolerr', Tag, Reason, Stack}
+    end.
+
+
+-endif.
+
+
+get_db_timeout_test() ->
+    % Q=1, N=1
+    ?assertEqual(20000, get_db_timeout(1, 2, 100, 60000)),
+
+    % Q=2, N=1
+    ?assertEqual(8571, get_db_timeout(2, 2, 100, 60000)),
+
+    % Q=2, N=3 (default)
+    ?assertEqual(472, get_db_timeout(2 * 3, 2, 100, 60000)),
+
+    % Q=3, N=3
+    ?assertEqual(100, get_db_timeout(3 * 3, 2, 100, 60000)),
+
+    % Q=4, N=1
+    ?assertEqual(1935, get_db_timeout(4, 2, 100, 60000)),
+
+    % Q=8, N=1
+    ?assertEqual(117, get_db_timeout(8, 2, 100, 60000)),
+
+    % Q=8, N=3 (default in 2.x)
+    ?assertEqual(100, get_db_timeout(8 * 3, 2, 100, 60000)),
+
+    % Q=256, N=3
+    ?assertEqual(100, get_db_timeout(256 * 3, 2, 100, 60000)),
+
+    % Large factor = 100
+    ?assertEqual(100, get_db_timeout(2 * 3, 100, 100, 60000)),
+
+    % Small total request timeout = 1 sec
+    ?assertEqual(100, get_db_timeout(2 * 3, 2, 100, 1000)),
+
+    % Large total request timeout
+    ?assertEqual(28346, get_db_timeout(2 * 3, 2, 100, 3600000)),
+
+    % No shards at all
+    ?assertEqual(60000, get_db_timeout(0, 2, 100, 60000)),
+
+    % request_timeout was set to infinity, with enough shards it still gets to
+    % 100 min timeout at the start from the exponential logic
+    ?assertEqual(100, get_db_timeout(64, 2, 100, infinity)).

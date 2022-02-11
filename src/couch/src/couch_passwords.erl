@@ -37,7 +37,7 @@ hash_admin_password(ClearPassword) when is_list(ClearPassword) ->
     hash_admin_password(?l2b(ClearPassword));
 hash_admin_password(ClearPassword) when is_binary(ClearPassword) ->
     %% Support both schemes to smooth migration from legacy scheme
-    Scheme = config:get("couch_httpd_auth", "password_scheme", "pbkdf2"),
+    Scheme = chttpd_util:get_chttpd_auth_config("password_scheme", "pbkdf2"),
     hash_admin_password(Scheme, ClearPassword).
 
 hash_admin_password("simple", ClearPassword) -> % deprecated
@@ -45,10 +45,10 @@ hash_admin_password("simple", ClearPassword) -> % deprecated
     Hash = crypto:hash(sha, <<ClearPassword/binary, Salt/binary>>),
     ?l2b("-hashed-" ++ couch_util:to_hex(Hash) ++ "," ++ ?b2l(Salt));
 hash_admin_password("pbkdf2", ClearPassword) ->
-    Iterations = config:get("couch_httpd_auth", "iterations", "10000"),
+    Iterations = chttpd_util:get_chttpd_auth_config("iterations", "10"),
     Salt = couch_uuids:random(),
     DerivedKey = couch_passwords:pbkdf2(couch_util:to_binary(ClearPassword),
-                                        Salt ,list_to_integer(Iterations)),
+                                        Salt, list_to_integer(Iterations)),
     ?l2b("-pbkdf2-" ++ ?b2l(DerivedKey) ++ ","
         ++ ?b2l(Salt) ++ ","
         ++ Iterations).
@@ -114,12 +114,12 @@ pbkdf2(_Password, _Salt, Iterations, _BlockIndex, Iteration, _Prev, Acc)
     when Iteration > Iterations ->
     Acc;
 pbkdf2(Password, Salt, Iterations, BlockIndex, 1, _Prev, _Acc) ->
-    InitialBlock = crypto:hmac(sha, Password,
+    InitialBlock = couch_util:hmac(sha, Password,
         <<Salt/binary,BlockIndex:32/integer>>),
     pbkdf2(Password, Salt, Iterations, BlockIndex, 2,
         InitialBlock, InitialBlock);
 pbkdf2(Password, Salt, Iterations, BlockIndex, Iteration, Prev, Acc) ->
-    Next = crypto:hmac(sha, Password, Prev),
+    Next = couch_util:hmac(sha, Password, Prev),
     pbkdf2(Password, Salt, Iterations, BlockIndex, Iteration + 1,
                    Next, crypto:exor(Next, Acc)).
 

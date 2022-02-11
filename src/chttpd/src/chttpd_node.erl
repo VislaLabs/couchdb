@@ -15,7 +15,8 @@
 
 -export([
     handle_node_req/1,
-    get_stats/0
+    get_stats/0,
+    run_queues/0
 ]).
 
 -include_lib("couch/include/couch_db.hrl").
@@ -30,6 +31,25 @@ handle_node_req(#httpd{path_parts=[_, <<"_local">>]}=Req) ->
     send_json(Req, 200, {[{name, node()}]});
 handle_node_req(#httpd{path_parts=[A, <<"_local">>|Rest]}=Req) ->
     handle_node_req(Req#httpd{path_parts=[A, node()] ++ Rest});
+% GET /_node/$node/_versions
+handle_node_req(#httpd{method='GET', path_parts=[_, _Node, <<"_versions">>]}=Req) ->
+    IcuVer = couch_ejson_compare:get_icu_version(),
+    UcaVer = couch_ejson_compare:get_uca_version(),
+    send_json(Req, 200, #{
+        erlang_version => ?l2b(?COUCHDB_ERLANG_VERSION),
+        collation_driver => #{
+            name => <<"libicu">>,
+            library_version => version_tuple_to_str(IcuVer),
+            collation_algorithm_version => version_tuple_to_str(UcaVer)
+        },
+        javascript_engine => #{
+            name => <<"spidermonkey">>,
+            version => couch_server:get_spidermonkey_version()
+        }
+    });
+handle_node_req(#httpd{path_parts=[_, _Node, <<"_versions">>]}=Req) ->
+    send_method_not_allowed(Req, "GET");
+
 % GET /_node/$node/_config
 handle_node_req(#httpd{method='GET', path_parts=[_, Node, <<"_config">>]}=Req) ->
     Grouped = lists:foldl(fun({{Section, Key}, Value}, Acc) ->
@@ -70,7 +90,9 @@ handle_node_req(#httpd{method='PUT', path_parts=[_, Node, <<"_config">>, Section
     Value = couch_util:trim(chttpd:json_body(Req)),
     Persist = chttpd:header_value(Req, "X-Couch-Persist") /= "false",
     OldValue = call_node(Node, config, get, [Section, Key, ""]),
-    case call_node(Node, config, set, [Section, Key, ?b2l(Value), Persist]) of
+    IsSensitive = Section == <<"admins">>,
+    Opts = #{persist => Persist, sensitive => IsSensitive},
+    case call_node(Node, config, set, [Section, Key, ?b2l(Value), Opts]) of
         ok ->
             send_json(Req, 200, list_to_binary(OldValue));
         {error, Reason} ->
@@ -114,6 +136,14 @@ handle_node_req(#httpd{method='GET', path_parts=[_, Node, <<"_stats">> | Path]}=
     chttpd:send_json(Req, EJSON1);
 handle_node_req(#httpd{path_parts=[_, _Node, <<"_stats">>]}=Req) ->
     send_method_not_allowed(Req, "GET");
+handle_node_req(#httpd{method='GET', path_parts=[_, Node, <<"_prometheus">>]}=Req) ->
+    Metrics = call_node(Node, couch_prometheus_server, scrape, []),
+    Version = call_node(Node, couch_prometheus_server, version, []),
+    Type  = "text/plain; version=" ++ Version,
+    Header = [{<<"Content-Type">>, ?l2b(Type)}],
+    chttpd:send_response(Req, 200, Header, Metrics);
+handle_node_req(#httpd{path_parts=[_, _Node, <<"_prometheus">>]}=Req) ->
+    send_method_not_allowed(Req, "GET");
 % GET /_node/$node/_system
 handle_node_req(#httpd{method='GET', path_parts=[_, Node, <<"_system">>]}=Req) ->
     Stats = call_node(Node, chttpd_node, get_stats, []),
@@ -134,7 +164,8 @@ handle_node_req(#httpd{path_parts=[_, Node | PathParts],
     {_, Query, Fragment} = mochiweb_util:urlsplit_path(RawUri),
     NewPath0 = "/" ++ lists:join("/", [couch_util:url_encode(P) || P <- PathParts]),
     NewRawPath = mochiweb_util:urlunsplit_path({NewPath0, Query, Fragment}),
-    MaxSize =  config:get_integer("httpd", "max_http_request_size", 4294967296),
+    MaxSize = chttpd_util:get_chttpd_config_integer(
+        "max_http_request_size", 4294967296),
     NewOpts = [{body, MochiReq0:recv_body(MaxSize)} | MochiReq0:get(opts)],
     Ref = erlang:make_ref(),
     MochiReq = mochiweb_request:new({remote, self(), Ref},
@@ -208,12 +239,15 @@ get_stats() ->
     {NumberOfGCs, WordsReclaimed, _} = statistics(garbage_collection),
     {{input, Input}, {output, Output}} = statistics(io),
     {CF, CDU} = db_pid_stats(),
-    MessageQueues0 = [{couch_file, {CF}}, {couch_db_updater, {CDU}}],
+    MessageQueues0 = [{couch_file, {CF}}, {couch_db_updater, {CDU}},
+        {couch_server, couch_server:aggregate_queue_len()}],
     MessageQueues = MessageQueues0 ++ message_queues(registered()),
+    {SQ, DCQ} = run_queues(),
     [
         {uptime, couch_app:uptime() div 1000},
         {memory, {Memory}},
-        {run_queue, statistics(run_queue)},
+        {run_queue, SQ},
+        {run_queue_dirty_cpu, DCQ},
         {ets_table_count, length(ets:all())},
         {context_switches, element(1, statistics(context_switches))},
         {reductions, element(1, statistics(reductions))},
@@ -285,3 +319,20 @@ message_queues(Registered) ->
         {Type, Length} = process_info(whereis(Name), Type),
         {Name, Length}
     end, Registered).
+
+%% Workaround for https://bugs.erlang.org/browse/ERL-1355
+run_queues() ->
+    case erlang:system_info(dirty_cpu_schedulers) > 0 of
+        false ->
+            {statistics(run_queue), 0};
+        true ->
+            [DCQ | SQs] = lists:reverse(statistics(run_queue_lengths)),
+            {lists:sum(SQs), DCQ}
+    end.
+
+version_tuple_to_str(Version) when is_tuple(Version) ->
+    List1 = tuple_to_list(Version),
+    IsZero = fun(N) -> N == 0 end,
+    List2 = lists:reverse(lists:dropwhile(IsZero, lists:reverse(List1))),
+    List3 = [erlang:integer_to_list(N) || N <- List2],
+    ?l2b(lists:join(".", List3)).

@@ -19,24 +19,26 @@ start_link() ->
 
 init([]) ->
     Children = [
-        {collation_driver,
-            {couch_drv, start_link, []},
-            permanent,
-            infinity,
-            supervisor,
-            [couch_drv]},
         {couch_task_status,
             {couch_task_status, start_link, []},
             permanent,
             brutal_kill,
             worker,
-            [couch_task_status]},
-        {couch_server,
-            {couch_server, sup_start_link, []},
-            permanent,
-            brutal_kill,
-            worker,
-            [couch_server]}
-    ],
+            [couch_task_status]}
+    ] ++ couch_servers(),
     {ok, {{one_for_one, 10, 3600}, Children}}.
 
+
+couch_servers() ->
+    N = couch_server:num_servers(),
+    [couch_server(I) || I <- lists:seq(1, N)].
+
+couch_server(N) ->
+    Name = couch_server:couch_server(N),
+    {Name,
+        {couch_server, sup_start_link, [N]},
+        permanent,
+        brutal_kill,
+        worker,
+        [couch_server]
+    }.

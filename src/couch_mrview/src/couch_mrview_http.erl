@@ -197,8 +197,9 @@ is_public_fields_configured(Db) ->
     DbName = ?b2l(couch_db:name(Db)),
     case config:get("couch_httpd_auth", "authentication_db", "_users") of
     DbName ->
-        UsersDbPublic = config:get("couch_httpd_auth", "users_db_public", "false"),
-        PublicFields = config:get("couch_httpd_auth", "public_fields"),
+        UsersDbPublic = chttpd_util:get_chttpd_auth_config(
+            "users_db_public", "false"),
+        PublicFields = chttpd_util:get_chttpd_auth_config("public_fields"),
         case {UsersDbPublic, PublicFields} of
         {"true", PublicFields} when PublicFields =/= undefined ->
             true;
@@ -529,15 +530,15 @@ parse_param(Key, Val, Args, IsDecoded) ->
             Args#mrargs{stable=true, update=lazy};
         "stale" ->
             throw({query_parse_error, <<"Invalid value for `stale`.">>});
-        "stable" when Val == "true" orelse Val == <<"true">> ->
+        "stable" when Val == "true" orelse Val == <<"true">> orelse Val == true ->
             Args#mrargs{stable=true};
-        "stable" when Val == "false" orelse Val == <<"false">> ->
+        "stable" when Val == "false" orelse Val == <<"false">> orelse Val == false ->
             Args#mrargs{stable=false};
         "stable" ->
             throw({query_parse_error, <<"Invalid value for `stable`.">>});
-        "update" when Val == "true" orelse Val == <<"true">> ->
+        "update" when Val == "true" orelse Val == <<"true">> orelse Val == true ->
             Args#mrargs{update=true};
-        "update" when Val == "false" orelse Val == <<"false">> ->
+        "update" when Val == "false" orelse Val == <<"false">> orelse Val == false ->
             Args#mrargs{update=false};
         "update" when Val == "lazy" orelse Val == <<"lazy">> ->
             Args#mrargs{update=lazy};

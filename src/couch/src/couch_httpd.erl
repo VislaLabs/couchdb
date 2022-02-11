@@ -39,10 +39,15 @@
 -export([check_max_request_length/1]).
 -export([handle_request/1]).
 -export([set_auth_handlers/0]).
+-export([maybe_decompress/2]).
 
 -define(HANDLER_NAME_IN_MODULE_POS, 6).
 -define(MAX_DRAIN_BYTES, 1048576).
 -define(MAX_DRAIN_TIME_MSEC, 1000).
+-define(DEFAULT_SOCKET_OPTIONS, "[{sndbuf, 262144}]").
+-define(DEFAULT_AUTHENTICATION_HANDLERS,
+    "{couch_httpd_auth, cookie_authentication_handler}, "
+    "{couch_httpd_auth, default_authentication_handler}").
 
 start_link() ->
     start_link(http).
@@ -109,7 +114,7 @@ start_link(Name, Options) ->
     {ok, ServerOptions} = couch_util:parse_term(
         config:get("httpd", "server_options", "[]")),
     {ok, SocketOptions} = couch_util:parse_term(
-        config:get("httpd", "socket_options", "[]")),
+        config:get("httpd", "socket_options", ?DEFAULT_SOCKET_OPTIONS)),
 
     set_auth_handlers(),
     Handlers = get_httpd_handlers(),
@@ -151,7 +156,8 @@ stop() ->
 
 set_auth_handlers() ->
     AuthenticationSrcs = make_fun_spec_strs(
-        config:get("httpd", "authentication_handlers", "")),
+        config:get("httpd", "authentication_handlers",
+            ?DEFAULT_AUTHENTICATION_HANDLERS)),
     AuthHandlers = lists:map(
         fun(A) -> {auth_handler_name(A), make_arity_1_fun(A)} end, AuthenticationSrcs),
     AuthenticationFuns = AuthHandlers ++ [
@@ -362,25 +368,21 @@ handle_request_int(MochiReq, DefaultFun,
             send_error(HttpReq, request_entity_too_large);
         exit:{uri_too_long, _} ->
             send_error(HttpReq, request_uri_too_long);
-        throw:Error ->
-            Stack = erlang:get_stacktrace(),
+        ?STACKTRACE(throw, Error, Stack)
             couch_log:debug("Minor error in HTTP request: ~p",[Error]),
             couch_log:debug("Stacktrace: ~p",[Stack]),
             send_error(HttpReq, Error);
-        error:badarg ->
-            Stack = erlang:get_stacktrace(),
+        ?STACKTRACE(error, badarg, Stack)
             couch_log:error("Badarg error in HTTP request",[]),
             couch_log:info("Stacktrace: ~p",[Stack]),
             send_error(HttpReq, badarg);
-        error:function_clause ->
-            Stack = erlang:get_stacktrace(),
+        ?STACKTRACE(error, function_clause, Stack)
             couch_log:error("function_clause error in HTTP request",[]),
             couch_log:info("Stacktrace: ~p",[Stack]),
             send_error(HttpReq, function_clause);
-        Tag:Error ->
-            Stack = erlang:get_stacktrace(),
+        ?STACKTRACE(ErrorType, Error, Stack)
             couch_log:error("Uncaught error in HTTP request: ~p",
-                            [{Tag, Error}]),
+                            [{ErrorType, Error}]),
             couch_log:info("Stacktrace: ~p",[Stack]),
             send_error(HttpReq, Error)
     end,
@@ -390,7 +392,7 @@ handle_request_int(MochiReq, DefaultFun,
     {ok, Resp}.
 
 validate_host(#httpd{} = Req) ->
-    case config:get_boolean("httpd", "validate_host", false) of
+    case chttpd_util:get_chttpd_config_boolean("validate_host", false) of
         true ->
             Host = hostname(Req),
             ValidHosts = valid_hosts(),
@@ -414,11 +416,12 @@ hostname(#httpd{} = Req) ->
     end.
 
 valid_hosts() ->
-    List = config:get("httpd", "valid_hosts", ""),
+    List = chttpd_util:get_chttpd_config("valid_hosts", ""),
     re:split(List, ",", [{return, list}]).
 
 check_request_uri_length(Uri) ->
-    check_request_uri_length(Uri, config:get("httpd", "max_uri_length")).
+    check_request_uri_length(Uri,
+        chttpd_util:get_chttpd_config("max_uri_length")).
 
 check_request_uri_length(_Uri, undefined) ->
     ok;
@@ -467,7 +470,8 @@ validate_ctype(Req, Ctype) ->
 
 check_max_request_length(Req) ->
     Len = list_to_integer(header_value(Req, "Content-Length", "0")),
-    MaxLen = config:get_integer("httpd", "max_http_request_size", 4294967296),
+    MaxLen = chttpd_util:get_chttpd_config_integer(
+        "max_http_request_size", 4294967296),
     case Len > MaxLen of
         true ->
             exit({body_too_large, Len});
@@ -536,7 +540,8 @@ path(#httpd{mochi_req=MochiReq}) ->
     MochiReq:get(path).
 
 host_for_request(#httpd{mochi_req=MochiReq}) ->
-    XHost = config:get("httpd", "x_forwarded_host", "X-Forwarded-Host"),
+    XHost = chttpd_util:get_chttpd_config(
+        "x_forwarded_host", "X-Forwarded-Host"),
     case MochiReq:get_header_value(XHost) of
         undefined ->
             case MochiReq:get_header_value("Host") of
@@ -554,11 +559,12 @@ host_for_request(#httpd{mochi_req=MochiReq}) ->
 
 absolute_uri(#httpd{mochi_req=MochiReq}=Req, [$/ | _] = Path) ->
     Host = host_for_request(Req),
-    XSsl = config:get("httpd", "x_forwarded_ssl", "X-Forwarded-Ssl"),
+    XSsl = chttpd_util:get_chttpd_config("x_forwarded_ssl", "X-Forwarded-Ssl"),
     Scheme = case MochiReq:get_header_value(XSsl) of
                  "on" -> "https";
                  _ ->
-                     XProto = config:get("httpd", "x_forwarded_proto", "X-Forwarded-Proto"),
+                     XProto = chttpd_util:get_chttpd_config(
+                         "x_forwarded_proto", "X-Forwarded-Proto"),
                      case MochiReq:get_header_value(XProto) of
                          %% Restrict to "https" and "http" schemes only
                          "https" -> "https";
@@ -573,7 +579,7 @@ absolute_uri(_Req, _Path) ->
     throw({bad_request, "path must begin with a /."}).
 
 unquote(UrlEncodedString) ->
-    mochiweb_util:unquote(UrlEncodedString).
+    chttpd:unquote(UrlEncodedString).
 
 quote(UrlDecodedString) ->
     mochiweb_util:quote_plus(UrlDecodedString).
@@ -588,24 +594,30 @@ recv_chunked(#httpd{mochi_req=MochiReq}, MaxChunkSize, ChunkFun, InitState) ->
     % Fun is called once with each chunk
     % Fun({Length, Binary}, State)
     % called with Length == 0 on the last time.
-    MochiReq:stream_body(MaxChunkSize, ChunkFun, InitState).
+    MochiReq:stream_body(MaxChunkSize, ChunkFun, InitState,
+        chttpd_util:get_chttpd_config_integer(
+            "max_http_request_size", 4294967296)).
 
 body_length(#httpd{mochi_req=MochiReq}) ->
     MochiReq:get(body_length).
 
 body(#httpd{mochi_req=MochiReq, req_body=undefined}) ->
-    MaxSize = config:get_integer("httpd", "max_http_request_size", 4294967296),
+    MaxSize = chttpd_util:get_chttpd_config_integer(
+        "max_http_request_size", 4294967296),
     MochiReq:recv_body(MaxSize);
 body(#httpd{req_body=ReqBody}) ->
     ReqBody.
 
-json_body(Httpd) ->
+json_body(#httpd{req_body=undefined} = Httpd) ->
     case body(Httpd) of
         undefined ->
             throw({bad_request, "Missing request body"});
         Body ->
             ?JSON_DECODE(maybe_decompress(Httpd, Body))
-    end.
+    end;
+
+json_body(#httpd{req_body=ReqBody}) ->
+    ReqBody.
 
 json_body_obj(Httpd) ->
     case json_body(Httpd) of
@@ -836,11 +848,12 @@ initialize_jsonp(Req) ->
         CallBack ->
             try
                 % make sure jsonp is configured on (default off)
-                case config:get("httpd", "allow_jsonp", "false") of
-                "true" ->
-                    validate_callback(CallBack);
-                _Else ->
-                    put(jsonp, no_jsonp)
+                case chttpd_util:get_chttpd_config_boolean(
+                        "allow_jsonp", false) of
+                    true ->
+                        validate_callback(CallBack);
+                    false ->
+                        put(jsonp, no_jsonp)
                 end
             catch
                 Error ->
@@ -931,6 +944,8 @@ error_info({error, {illegal_database_name, Name}}) ->
     {400, <<"illegal_database_name">>, Message};
 error_info({missing_stub, Reason}) ->
     {412, <<"missing_stub">>, Reason};
+error_info({misconfigured_server, Reason}) ->
+    {500, <<"misconfigured_server">>, couch_util:to_binary(Reason)};
 error_info({Error, Reason}) ->
     {500, couch_util:to_binary(Error), couch_util:to_binary(Reason)};
 error_info(Error) ->
@@ -941,20 +956,22 @@ error_headers(#httpd{mochi_req=MochiReq}=Req, Code, ErrorStr, ReasonStr) ->
         % this is where the basic auth popup is triggered
         case MochiReq:get_header_value("X-CouchDB-WWW-Authenticate") of
         undefined ->
-            case config:get("httpd", "WWW-Authenticate", undefined) of
+            case chttpd_util:get_chttpd_config("WWW-Authenticate") of
             undefined ->
                 % If the client is a browser and the basic auth popup isn't turned on
                 % redirect to the session page.
                 case ErrorStr of
                 <<"unauthorized">> ->
-                    case config:get("couch_httpd_auth", "authentication_redirect", undefined) of
+                    case chttpd_util:get_chttpd_auth_config(
+                        "authentication_redirect", "/_utils/session.html") of
                     undefined -> {Code, []};
                     AuthRedirect ->
-                        case config:get("couch_httpd_auth", "require_valid_user", "false") of
-                        "true" ->
+                        case chttpd_util:get_chttpd_auth_config_boolean(
+                            "require_valid_user", false) of
+                        true ->
                             % send the browser popup header no matter what if we are require_valid_user
                             {Code, [{"WWW-Authenticate", "Basic realm=\"server\""}]};
-                        _False ->
+                        false ->
                             case MochiReq:accepts_content_type("application/json") of
                             true ->
                                 {Code, []};

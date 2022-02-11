@@ -86,9 +86,6 @@ DIALYZE_OPTS=skip_deps=$(skip_deps)
 
 EXUNIT_OPTS=$(subst $(comma),$(space),$(tests))
 
-#ignore javascript tests
-ignore_js_suites=
-
 TEST_OPTS=-c startup_jitter=0 -c default_security=admin_local
 
 ################################################################################
@@ -135,7 +132,6 @@ fauxton: share\www
 # target: check - Test everything
 check: all python-black
 	@$(MAKE) eunit
-	@$(MAKE) javascript
 	@$(MAKE) mango-test
 	@$(MAKE) elixir
 
@@ -186,7 +182,7 @@ python-black: .venv/bin/black
 	@python.exe -c "import sys; exit(1 if sys.version_info >= (3,6) else 0)" || \
 		.venv\Scripts\black.exe --check \
 		--exclude="build/|buck-out/|dist/|_build/|\.git/|\.hg/|\.mypy_cache/|\.nox/|\.tox/|\.venv/|src/rebar/pr2relnotes.py|src/fauxton" \
-		build-aux dev\run test\javascript\run src\mango\test src\docs\src\conf.py src\docs\ext .
+		build-aux dev\run src\mango\test src\docs\src\conf.py src\docs\ext .
 
 python-black-update: .venv/bin/black
 	@python.exe -c "import sys; exit(1 if sys.version_info < (3,6) else 0)" || \
@@ -194,13 +190,15 @@ python-black-update: .venv/bin/black
 	@python.exe -c "import sys; exit(1 if sys.version_info >= (3,6) else 0)" || \
 		.venv\Scripts\black.exe \
 		--exclude="build/|buck-out/|dist/|_build/|\.git/|\.hg/|\.mypy_cache/|\.nox/|\.tox/|\.venv/|src/rebar/pr2relnotes.py|src/fauxton" \
-		build-aux dev\run test\javascript\run src\mango\test src\docs\src\conf.py src\docs\ext .
+		build-aux dev\run src\mango\test src\docs\src\conf.py src\docs\ext .
 
 .PHONY: elixir
 elixir: export MIX_ENV=integration
 elixir: export COUCHDB_TEST_ADMIN_PARTY_OVERRIDE=1
 elixir: elixir-init elixir-check-formatted elixir-credo devclean
-	@dev\run $(TEST_OPTS) -a adm:pass -n 1 --enable-erlang-views --no-eval 'mix test --trace --exclude without_quorum_test --exclude with_quorum_test $(EXUNIT_OPTS)'
+	@dev\run $(TEST_OPTS) -a adm:pass -n 1 --enable-erlang-views \
+      --locald-config test/elixir/test/config/test-config.ini \
+      --no-eval 'mix test --trace --exclude without_quorum_test --exclude with_quorum_test $(EXUNIT_OPTS)'
 
 .PHONY: elixir-init
 elixir-init: MIX_ENV=test
@@ -221,6 +219,17 @@ elixir-cluster-with-quorum: elixir-init elixir-check-formatted elixir-credo devc
 	    --degrade-cluster 1 \
 		--no-eval 'mix test --trace --only with_quorum_test $(EXUNIT_OPTS)'
 
+.PHONY: elixir-suite
+elixir-suite: export MIX_ENV=integration
+elixir-suite: export COUCHDB_TEST_ADMIN_PARTY_OVERRIDE=1
+elixir-suite: elixir-init elixir-check-formatted elixir-credo devclean
+	@dev\run -n 1 -q -a adm:pass \
+		--enable-erlang-views \
+		--no-join \
+		--locald-config test/elixir/test/config/test-config.ini \
+		--erlang-config rel/files/eunit.config \
+		--no-eval 'mix test --trace --include test\elixir\test\config\suite.elixir --exclude test\elixir\test\config\skip.elixir'
+
 .PHONY: elixir-check-formatted
 elixir-check-formatted: elixir-init
 	@mix format --check-formatted
@@ -230,26 +239,6 @@ elixir-check-formatted: elixir-init
 .PHONY: elixir-credo
 elixir-credo: elixir-init
 	@mix credo
-
-
-.PHONY: javascript
-# target: javascript - Run JavaScript test suites or specific ones defined by suites option
-javascript: export COUCHDB_TEST_ADMIN_PARTY_OVERRIDE=1
-javascript:
-	@$(MAKE) devclean
-	-@mkdir share\www\script\test
-ifeq ($(IN_RELEASE), true)
-	@copy test\javascript\tests\lorem*.txt share\www\script\test
-else
-	-@mkdir src\fauxton\dist\release\test
-	@copy test\javascript\tests\lorem*.txt src\fauxton\dist\release\test
-endif
-	@python dev\run -n 1 -q --with-admin-party-please \
-		    --enable-erlang-views \
-            $(TEST_OPTS) \
-            'python test\javascript\run --suites "$(suites)" \
-            --ignore "$(ignore_js_suites)"'
-
 
 .PHONY: check-qs
 # target: check-qs - Run query server tests (ruby and rspec required!)
@@ -406,6 +395,9 @@ devclean:
 	-@rmdir /s/q dev\lib\node1\data
 	-@rmdir /s/q dev\lib\node2\data
 	-@rmdir /s/q dev\lib\node3\data
+	-@rmdir /s/q dev\lib\node1\etc
+	-@rmdir /s/q dev\lib\node2\etc
+	-@rmdir /s/q dev\lib\node3\etc
 
 
 ################################################################################
@@ -418,7 +410,7 @@ devclean:
 config.erl:
 	@echo Apache CouchDB has not been configured.
 	@echo Try "powershell -ExecutionPolicy Bypass .\configure.ps1 -?" for help.
-	@echo You probably want "powershell -ExecutionPolicy Bypass .\configure.ps1 -WithCurl".
+	@echo You probably want "powershell -ExecutionPolicy Bypass .\configure.ps1".
 	@echo.
 	@false
 
@@ -433,7 +425,7 @@ endif
 share\www:
 ifeq ($(with_fauxton), 1)
 	@echo 'Building Fauxton'
-	@cd src\fauxton && npm install --production && .\node_modules\.bin\grunt couchdb
+	@cd src\fauxton && npm install && .\node_modules\.bin\grunt couchdb
 endif
 
 derived:

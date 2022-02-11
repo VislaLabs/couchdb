@@ -26,7 +26,7 @@
 
 -export([get_db_info/2, get_doc_count/2, get_design_doc_count/2,
          get_update_seq/2, changes/4, map_view/5, reduce_view/5,
-         group_info/3, update_mrview/4]).
+         group_info/3, update_mrview/4, get_uuid/1]).
 
 -include_lib("fabric/include/fabric.hrl").
 -include_lib("couch/include/couch_db.hrl").
@@ -304,7 +304,7 @@ reset_validation_funs(DbName) ->
 open_shard(Name, Opts) ->
     set_io_priority(Name, Opts),
     try
-        rexi:reply(couch_db:open(Name, Opts))
+        rexi:reply(mem3_util:get_or_create_db(Name, Opts))
     catch exit:{timeout, _} ->
         couch_stats:increment_counter([fabric, open_shard, timeouts])
     end.
@@ -318,6 +318,9 @@ compact(ShardName, DesignName) ->
     Ref = erlang:make_ref(),
     Pid ! {'$gen_call', {self(), Ref}, compact}.
 
+get_uuid(DbName) ->
+    with_db(DbName, [], {couch_db, get_uuid, []}).
+
 %%
 %% internal
 %%
@@ -330,9 +333,9 @@ with_db(DbName, Options, {M,F,A}) ->
             apply(M, F, [Db | A])
         catch Exception ->
             Exception;
-        error:Reason ->
+        ?STACKTRACE(error, Reason, Stack)
             couch_log:error("rpc ~p:~p/~p ~p ~p", [M, F, length(A)+1, Reason,
-                clean_stack()]),
+                clean_stack(Stack)]),
             {error, Reason}
         end);
     Error ->
@@ -439,7 +442,7 @@ get_node_seqs(Db, Nodes) ->
 
 
 get_or_create_db(DbName, Options) ->
-    mem3_util:get_or_create_db(DbName, Options).
+    mem3_util:get_or_create_db_int(DbName, Options).
 
 
 get_view_cb(#mrargs{extra = Options}) ->
@@ -596,9 +599,8 @@ make_att_reader({fabric_attachment_receiver, Middleman, Length}) ->
 make_att_reader(Else) ->
     Else.
 
-clean_stack() ->
-    lists:map(fun({M,F,A}) when is_list(A) -> {M,F,length(A)}; (X) -> X end,
-        erlang:get_stacktrace()).
+clean_stack(S) ->
+    lists:map(fun({M,F,A}) when is_list(A) -> {M,F,length(A)}; (X) -> X end, S).
 
 set_io_priority(DbName, Options) ->
     case lists:keyfind(io_priority, 1, Options) of
@@ -638,10 +640,9 @@ calculate_start_seq(Db, Node, Seq) ->
 
 uuid(Db) ->
     Uuid = couch_db:get_uuid(Db),
-    binary:part(Uuid, {0, uuid_prefix_len()}).
+    Prefix = fabric_util:get_uuid_prefix_len(),
+    binary:part(Uuid, {0, Prefix}).
 
-uuid_prefix_len() ->
-    list_to_integer(config:get("fabric", "uuid_prefix_len", "7")).
 
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").

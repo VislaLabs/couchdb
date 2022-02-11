@@ -59,6 +59,73 @@ defmodule BasicsTest do
   end
 
   @tag :with_db
+  test "Limit and skip should work in _all_dbs", context do
+    db = context[:db_name]
+    db_count = length(Couch.get("/_all_dbs").body)
+    assert db_count > 0
+    assert Couch.get("/_all_dbs?limit=0").body == []
+    assert length(Couch.get("/_all_dbs?limit=1").body) >= 1
+    assert length(Couch.get("/_all_dbs?skip=1").body) == (db_count - 1)
+    assert [db] == Couch.get("/_all_dbs?start_key=\"#{db}\"&limit=1").body
+  end
+
+  test "Database name with '+' should encode to '+'", _context do
+    set_config({"chttpd", "decode_plus_to_space", "false"})
+
+    random_number = :rand.uniform(16_000_000)
+    db_name = "random+test+db+#{random_number}"
+    resp = Couch.put("/#{db_name}")
+
+    assert resp.status_code == 201
+    assert resp.body["ok"] == true
+
+    resp = Couch.get("/#{db_name}")
+
+    assert resp.status_code == 200
+    assert resp.body["db_name"] == db_name
+  end
+
+  test "Database name with '%2B' should encode to '+'", _context do
+    set_config({"chttpd", "decode_plus_to_space", "true"})
+
+    random_number = :rand.uniform(16_000_000)
+    db_name = "random%2Btest%2Bdb2%2B#{random_number}"
+    resp = Couch.put("/#{db_name}")
+
+    assert resp.status_code == 201
+    assert resp.body["ok"] == true
+
+    resp = Couch.get("/#{db_name}")
+
+    assert resp.status_code == 200
+    assert resp.body["db_name"] == "random+test+db2+#{random_number}"
+  end
+
+  @tag :with_db
+  test "'+' in document name should encode to '+'", context do
+    set_config({"chttpd", "decode_plus_to_space", "false"})
+
+    db_name = context[:db_name]
+    doc_id = "test+doc"
+    resp = Couch.put("/#{db_name}/#{doc_id}", body: %{})
+
+    assert resp.status_code == 201
+    assert resp.body["id"] == "test+doc"
+  end
+
+  @tag :with_db
+  test "'+' in document name should encode to space", context do
+    set_config({"chttpd", "decode_plus_to_space", "true"})
+
+    db_name = context[:db_name]
+    doc_id = "test+doc+2"
+    resp = Couch.put("/#{db_name}/#{doc_id}", body: %{})
+
+    assert resp.status_code == 201
+    assert resp.body["id"] == "test doc 2"
+  end
+
+  @tag :with_db
   test "Empty database should have zero docs", context do
     assert Couch.get("/#{context[:db_name]}").body["doc_count"] == 0,
            "Empty doc count in empty db"
@@ -303,5 +370,15 @@ defmodule BasicsTest do
        _context do
     # TODO
     assert true
+  end
+
+  @tag :with_db
+  test "Default headers are returned for doc with open_revs=all", context do
+    db_name = context[:db_name]
+    post_response = Couch.post("/#{db_name}", body: %{:foo => :bar})
+    id = post_response.body["id"]
+    head_response = Couch.head("/#{db_name}/#{id}?open_revs=all")
+    assert head_response.headers["X-Couch-Request-ID"]
+    assert head_response.headers["X-CouchDB-Body-Time"]
   end
 end

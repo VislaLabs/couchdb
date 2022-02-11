@@ -18,6 +18,9 @@
 %% exported for upgrade purposes.
 -export([keep_sending_changes/8]).
 
+%% exported for testing and remsh debugging
+-export([decode_seq/1]).
+
 -include_lib("fabric/include/fabric.hrl").
 -include_lib("mem3/include/mem3.hrl").
 -include_lib("couch/include/couch_db.hrl").
@@ -143,29 +146,22 @@ send_changes(DbName, ChangesArgs, Callback, PackedSeqs, AccIn, Timeout) ->
          Ref = rexi:cast(N, {fabric_rpc, changes, [Name, ChangesArgs, Arg]}),
          {S#shard{ref = Ref}, Seq}
     end, WSplitSeqs0),
-    % For ranges that were not split start sequences from 0
-    WReps = lists:map(fun(#shard{name = Name, node = N} = S) ->
-         Ref = rexi:cast(N, {fabric_rpc, changes, [Name, ChangesArgs, 0]}),
+    % For ranges that were not split, look for a replacement on a different node
+    WReps = lists:map(fun(#shard{name = Name, node = NewNode, range = R} = S) ->
+         Arg = find_replacement_sequence(Dead, R),
+         case Arg =/= 0 of true -> ok; false ->
+             couch_log:warning("~p reset seq for ~p", [?MODULE, S])
+         end,
+         Ref = rexi:cast(NewNode, {fabric_rpc, changes, [Name, ChangesArgs, Arg]}),
          {S#shard{ref = Ref}, 0}
     end, Reps1),
     Seqs = WSeqs ++ WSplitSeqs ++ WReps,
     {Workers0, _} = lists:unzip(Seqs),
     Repls = fabric_ring:get_shard_replacements(DbName, Workers0),
     StartFun = fun(#shard{name=Name, node=N, range=R0}=Shard) ->
-        %% Find the original shard copy in the Seqs array
-        case lists:dropwhile(fun({S, _}) -> S#shard.range =/= R0 end, Seqs) of
-            [{#shard{}, {replace, _, _, _}} | _] ->
-                % Don't attempt to replace a replacement
-                SeqArg = 0;
-            [{#shard{node = OldNode}, OldSeq} | _] ->
-                SeqArg = make_replacement_arg(OldNode, OldSeq);
-            _ ->
-                % TODO this clause is probably unreachable in the N>2
-                % case because we compute replacements only if a shard has one
-                % in the original set.
-                couch_log:error("Streaming ~s from zero while replacing ~p",
-                    [Name, PackedSeqs]),
-                SeqArg = 0
+        SeqArg = find_replacement_sequence(Seqs, R0),
+        case SeqArg =/= 0 of true -> ok; false ->
+            couch_log:warning("~p StartFun reset seq for ~p", [?MODULE, Shard])
         end,
         Ref = rexi:cast(N, {fabric_rpc, changes, [Name, ChangesArgs, SeqArg]}),
         Shard#shard{ref = Ref}
@@ -410,6 +406,22 @@ unpack_seq_decode_term(Opaque) ->
     binary_to_term(couch_util:decodeBase64Url(Opaque)).
 
 
+% This is used for testing and for remsh debugging
+%
+% Return the unpacked list of sequences from a raw update seq string. The input
+% string is expected to include the N- prefix. The result looks like:
+%  [{Node, Range, {SeqNum, Uuid, EpochNode}}, ...]
+%
+-spec decode_seq(binary()) -> [tuple()].
+decode_seq(Packed) ->
+    Opaque = unpack_seq_regex_match(Packed),
+    unpack_seq_decode_term(Opaque).
+
+
+% Returns fabric_dict with {Shard, Seq} entries
+%
+-spec unpack_seqs(pos_integer() | list() | binary(), binary()) ->
+        orddict:orddict().
 unpack_seqs(0, DbName) ->
     fabric_dict:init(mem3:shards(DbName), 0);
 
@@ -453,12 +465,14 @@ do_unpack_seqs(Opaque, DbName) ->
         true ->
             Unpacked;
         false ->
+            Uuids = get_db_uuid_shards(DbName),
             PotentialWorkers = lists:map(fun({Node, [A, B], Seq}) ->
                 case mem3:get_shard(DbName, Node, [A, B]) of
                     {ok, Shard} ->
                         {Shard, Seq};
                     {error, not_found} ->
-                        {#shard{node = Node, range = [A, B]}, Seq}
+                        Shard = replace_moved_shard(Node, [A, B], Seq, Uuids),
+                        {Shard, Seq}
                 end
             end, Deduped),
             Shards = mem3:shards(DbName),
@@ -492,6 +506,59 @@ get_old_seq(#shard{range=R}=Shard, SinceSeqs) ->
             couch_log:warning("~p get_old_seq error: ~p, shard: ~p, seqs: ~p",
                 [?MODULE, Error, Shard, SinceSeqs]),
             0
+    end.
+
+
+get_db_uuid_shards(DbName) ->
+    % Need to use an isolated process as we are performing a fabric call from
+    % another fabric call and there is a good chance we'd polute the mailbox
+    % with returned messages
+    Timeout = fabric_util:request_timeout(),
+    IsolatedFun = fun() -> fabric:db_uuids(DbName) end,
+    try fabric_util:isolate(IsolatedFun, Timeout) of
+        {ok, Uuids} ->
+            % Trim uuids so we match exactly based on the currently configured
+            % uuid_prefix_len. The assumption is that we are getting an older
+            % sequence from the same cluster and we didn't tweak that
+            % relatively obscure config option in the meantime.
+            PrefixLen = fabric_util:get_uuid_prefix_len(),
+            maps:fold(fun(Uuid, Shard, Acc) ->
+                TrimmedUuid = binary:part(Uuid, {0, PrefixLen}),
+                Acc#{TrimmedUuid => Shard}
+            end, #{}, Uuids);
+        {error, Error} ->
+            % Since we are doing a best-effort approach to match moved shards,
+            % tolerate and log errors. This should also handle cases when the
+            % cluster is partially upgraded, as some nodes will not have the
+            % newer get_uuid fabric_rpc handler.
+            ErrMsg = "~p : could not get db_uuids for Db:~p Error:~p",
+            couch_log:error(ErrMsg, [?MODULE, DbName, Error]),
+            #{}
+    catch
+        _Tag:Error ->
+            ErrMsg = "~p : could not get db_uuids for Db:~p Error:~p",
+            couch_log:error(ErrMsg, [?MODULE, DbName, Error]),
+            #{}
+    end.
+
+
+%% Determine if the missing shard moved to a new node. Do that by matching the
+%% uuids from the current shard map. If we cannot find a moved shard, we return
+%% the original node and range as a shard and hope for the best.
+replace_moved_shard(Node, Range, Seq, #{} = _UuidShards) when is_number(Seq) ->
+    % Cannot figure out shard moves without uuid matching
+    #shard{node = Node, range = Range};
+replace_moved_shard(Node, Range, {Seq, Uuid}, #{} = UuidShards) ->
+    % Compatibility case for an old seq format which didn't have epoch nodes
+    replace_moved_shard(Node, Range, {Seq, Uuid, Node}, UuidShards);
+replace_moved_shard(Node, Range, {_Seq, Uuid, _EpochNode}, #{} = UuidShards) ->
+    case UuidShards of
+        #{Uuid := #shard{range = Range} = Shard} ->
+            % Found a moved shard by matching both the uuid and the range
+            Shard;
+        #{} ->
+            % Did not find a moved shard, use the original node
+            #shard{node = Node, range = Range}
     end.
 
 
@@ -594,6 +661,22 @@ find_split_shard_replacements(DeadWorkers, Shards) ->
     end, Acc0, DeadWorkers),
     {Workers, Available} = AccF,
     {fabric_dict:from_list(Workers), Available}.
+
+
+find_replacement_sequence(OriginalSeqs, R0) ->
+    %% Find the original shard copy in the Seqs array
+    case lists:dropwhile(fun({S, _}) -> S#shard.range =/= R0 end, OriginalSeqs) of
+        [{#shard{}, {replace, _, _, _}} | _] ->
+            % Don't attempt to replace a replacement
+            0;
+        [{#shard{node = OldNode}, OldSeq} | _] ->
+            make_replacement_arg(OldNode, OldSeq);
+        _ ->
+            % TODO we don't currently attempt to replace a shard with split
+            % replicas of that range on other nodes, so it's possible to end
+            % up with an empty list here.
+            0
+    end.
 
 
 make_split_seq({Num, Uuid, Node}, RepCount) when RepCount > 1 ->
@@ -818,3 +901,36 @@ find_split_shard_replacements_test() ->
     {Workers3, ShardsLeft3} = find_split_shard_replacements(Dead3, Shards3),
     ?assertEqual([], Workers3),
     ?assertEqual(Shards3, ShardsLeft3).
+
+
+find_replacement_sequence_test() ->
+    Shards = [{"n2", 0, 10}, {"n3", 0, 5}],
+    Uuid = <<"abc1234">>,
+    Epoch = 'n1',
+
+    % Not safe to use a plain integer sequence number
+    Dead1 = mk_workers(Shards, 42),
+    ?assertEqual(0, find_replacement_sequence(Dead1, [0, 10])),
+    ?assertEqual(0, find_replacement_sequence(Dead1, [0, 5])),
+
+    % {Seq, Uuid} should work
+    Dead2 = mk_workers(Shards, {43, Uuid}),
+    ?assertEqual({replace, 'n2', Uuid, 43},
+        find_replacement_sequence(Dead2, [0, 10])),
+    ?assertEqual({replace, 'n3', Uuid, 43},
+        find_replacement_sequence(Dead2, [0, 5])),
+
+    % Can't find the range at all
+    ?assertEqual(0, find_replacement_sequence(Dead2, [0, 4])),
+
+    % {Seq, Uuids, EpochNode} should work
+    Dead3 = mk_workers(Shards, {44, Uuid, Epoch}),
+    ?assertEqual({replace, 'n1', Uuid, 44},
+        find_replacement_sequence(Dead3, [0, 10])),
+    ?assertEqual({replace, 'n1', Uuid, 44},
+        find_replacement_sequence(Dead3, [0, 5])),
+
+    % Cannot replace a replacement
+    Dead4 = mk_workers(Shards, {replace, 'n1', Uuid, 45}),
+    ?assertEqual(0, find_replacement_sequence(Dead4, [0, 10])),
+    ?assertEqual(0, find_replacement_sequence(Dead4, [0, 5])).

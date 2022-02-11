@@ -72,7 +72,7 @@ DESTDIR=
 
 # Rebar options
 apps=
-skip_deps=folsom,meck,mochiweb,triq,proper,snappy,bcrypt,hyper
+skip_deps=folsom,meck,mochiweb,triq,proper,snappy,bcrypt,hyper,ibrowse
 suites=
 tests=
 
@@ -90,9 +90,6 @@ DIALYZE_OPTS=$(shell echo "\
 	" | sed -e 's/[a-z]\{1,\}= / /g')
 EXUNIT_OPTS=$(subst $(comma),$(space),$(tests))
 
-#ignore javascript tests
-ignore_js_suites=
-
 TEST_OPTS="-c 'startup_jitter=0' -c 'default_security=admin_local'"
 
 ################################################################################
@@ -102,7 +99,7 @@ TEST_OPTS="-c 'startup_jitter=0' -c 'default_security=admin_local'"
 
 .PHONY: all
 # target: all - Build everything
-all: couch fauxton docs
+all: couch fauxton docs escriptize
 
 
 .PHONY: help
@@ -139,6 +136,13 @@ endif
 fauxton: share/www
 
 
+.PHONY: escriptize
+# target: escriptize - Build CLI tools
+escriptize: couch
+	@$(REBAR) -r escriptize apps=weatherreport
+	@cp src/weatherreport/weatherreport bin/weatherreport
+
+
 ################################################################################
 # Testing
 ################################################################################
@@ -148,9 +152,9 @@ fauxton: share/www
 # target: check - Test everything
 check: all python-black
 	@$(MAKE) eunit
-	@$(MAKE) javascript
 	@$(MAKE) mango-test
-	@$(MAKE) elixir
+	@$(MAKE) elixir-suite
+	@$(MAKE) weatherreport-test
 
 ifdef apps
 subdirs = $(apps)
@@ -179,7 +183,7 @@ exunit: export ERL_LIBS = $(shell pwd)/src
 exunit: export ERL_AFLAGS = -config $(shell pwd)/rel/files/eunit.config
 exunit: export COUCHDB_QUERY_SERVER_JAVASCRIPT = $(shell pwd)/bin/couchjs $(shell pwd)/share/server/main.js
 exunit: couch elixir-init setup-eunit elixir-check-formatted elixir-credo
-	@mix test --cover --trace $(EXUNIT_OPTS)
+	@mix test --trace $(EXUNIT_OPTS)
 
 setup-eunit: export BUILDDIR = $(shell pwd)
 setup-eunit: export ERL_AFLAGS = -config $(shell pwd)/rel/files/eunit.config
@@ -209,7 +213,7 @@ python-black: .venv/bin/black
 	@python3 -c "import sys; exit(1 if sys.version_info >= (3,6) else 0)" || \
 		LC_ALL=C.UTF-8 LANG=C.UTF-8 .venv/bin/black --check \
 		--exclude="build/|buck-out/|dist/|_build/|\.git/|\.hg/|\.mypy_cache/|\.nox/|\.tox/|\.venv/|src/rebar/pr2relnotes.py|src/fauxton" \
-		build-aux/*.py dev/run test/javascript/run src/mango/test/*.py src/docs/src/conf.py src/docs/ext/*.py .
+		build-aux/*.py dev/run src/mango/test/*.py src/docs/src/conf.py src/docs/ext/*.py .
 
 python-black-update: .venv/bin/black
 	@python3 -c "import sys; exit(1 if sys.version_info < (3,6) else 0)" || \
@@ -217,7 +221,7 @@ python-black-update: .venv/bin/black
 	@python3 -c "import sys; exit(1 if sys.version_info >= (3,6) else 0)" || \
 		LC_ALL=C.UTF-8 LANG=C.UTF-8 .venv/bin/black \
 		--exclude="build/|buck-out/|dist/|_build/|\.git/|\.hg/|\.mypy_cache/|\.nox/|\.tox/|\.venv/|src/rebar/pr2relnotes.py|src/fauxton" \
-		build-aux/*.py dev/run test/javascript/run src/mango/test/*.py src/docs/src/conf.py src/docs/ext/*.py .
+		build-aux/*.py dev/run src/mango/test/*.py src/docs/src/conf.py src/docs/ext/*.py .
 
 .PHONY: elixir
 elixir: export MIX_ENV=integration
@@ -247,6 +251,17 @@ elixir-cluster-with-quorum: elixir-init elixir-check-formatted elixir-credo devc
 		--degrade-cluster 1 \
 		--no-eval 'mix test --trace --only with_quorum_test $(EXUNIT_OPTS)'
 
+.PHONY: elixir-suite
+elixir-suite: export MIX_ENV=integration
+elixir-suite: export COUCHDB_TEST_ADMIN_PARTY_OVERRIDE=1
+elixir-suite: elixir-init elixir-check-formatted elixir-credo devclean
+	@dev/run -n 1 -q -a adm:pass \
+		--enable-erlang-views \
+		--no-join \
+		--locald-config test/elixir/test/config/test-config.ini \
+		--erlang-config rel/files/eunit.config \
+		--no-eval 'mix test --trace --include test/elixir/test/config/suite.elixir --exclude test/elixir/test/config/skip.elixir'
+
 .PHONY: elixir-check-formatted
 elixir-check-formatted: elixir-init
 	@mix format --check-formatted
@@ -256,44 +271,6 @@ elixir-check-formatted: elixir-init
 .PHONY: elixir-credo
 elixir-credo: elixir-init
 	@mix credo
-
-.PHONY: javascript
-# target: javascript - Run JavaScript test suites or specific ones defined by suites option
-javascript: export COUCHDB_TEST_ADMIN_PARTY_OVERRIDE=1
-javascript: 
-
-	@$(MAKE) devclean
-	@mkdir -p share/www/script/test
-ifeq ($(IN_RELEASE), true)
-	@cp test/javascript/tests/lorem*.txt share/www/script/test/
-else
-	@mkdir -p src/fauxton/dist/release/test
-	@cp test/javascript/tests/lorem*.txt src/fauxton/dist/release/test/
-endif
-	@dev/run -n 1 -q --with-admin-party-please \
-            --enable-erlang-views \
-            "$(TEST_OPTS)" \
-            'test/javascript/run --suites "$(suites)" \
-            --ignore "$(ignore_js_suites)"'
-
-
-.PHONY: soak-javascript
-soak-javascript: export COUCHDB_TEST_ADMIN_PARTY_OVERRIDE=1
-soak-javascript:
-	@mkdir -p share/www/script/test
-ifeq ($(IN_RELEASE), true)
-	@cp test/javascript/tests/lorem*.txt share/www/script.test/
-else
-	@mkdir -p src/fauxton/dist/release/test
-	@cp test/javascript/tests/lorem*.txt src/fauxton/dist/release/test/
-endif
-	@rm -rf dev/lib
-	while [ $$? -eq 0 ]; do \
-		dev/run -n 1 -q --with-admin-party-please \
-				"$(TEST_OPTS)" \
-				'test/javascript/run --suites "$(suites)" \
-				--ignore "$(ignore_js_suites)"'  \
-	done
 
 .PHONY: build-report
 # target: build-report - Generate and upload a build report
@@ -323,14 +300,6 @@ list-eunit-suites:
 		| sort
 
 
-.PHONY: list-js-suites
-# target: list-js-suites - List JavaScript test suites
-list-js-suites:
-	@find ./test/javascript/tests/ -type f -name *.js -exec basename {} \; \
-		| cut -d '.' -f -1 \
-		| sort
-
-
 .PHONY: build-test
 # target: build-test - Test build script
 build-test:
@@ -345,6 +314,13 @@ mango-test: devclean all
 		python3 -m venv .venv && \
 		.venv/bin/python3 -m pip install -r requirements.txt
 	@cd src/mango && ../../dev/run "$(TEST_OPTS)" -n 1 --admin=testuser:testpass '.venv/bin/python3 -m nose --with-xunit'
+
+
+.PHONY: weatherreport-test
+# target: weatherreport-test - Run weatherreport against dev cluster
+weatherreport-test: devclean escriptize
+	@dev/run -n 1 -a adm:pass --no-eval \
+		'bin/weatherreport --etc dev/lib/node1/etc --level error'
 
 ################################################################################
 # Developing
@@ -403,6 +379,7 @@ release: all
 	@echo "Installing CouchDB into rel/couchdb/ ..."
 	@rm -rf rel/couchdb
 	@$(REBAR) generate # make full erlang release
+	@cp bin/weatherreport rel/couchdb/bin/weatherreport
 
 ifeq ($(with_fauxton), 1)
 	@mkdir -p rel/couchdb/share/
@@ -451,6 +428,7 @@ clean:
 	@$(REBAR) -r clean
 	@rm -rf .rebar/
 	@rm -f bin/couchjs
+	@rm -f bin/weatherreport
 	@rm -rf src/*/ebin
 	@rm -rf src/*/.rebar
 	@rm -rf src/*/priv/*.so
@@ -460,7 +438,8 @@ clean:
 	@rm -rf src/mango/.venv
 	@rm -f src/couch/priv/couchspawnkillable
 	@rm -f src/couch/priv/couch_js/config.h
-	@rm -f dev/boot_node.beam dev/pbkdf2.pyc log/crash.log
+	@rm -f dev/*.beam dev/devnode.* dev/pbkdf2.pyc log/crash.log
+	@rm -f dev/erlserver.pem dev/couch_ssl_dist.conf
 
 
 .PHONY: distclean
@@ -482,7 +461,7 @@ endif
 # target: devclean - Remove dev cluster artifacts
 devclean:
 	@rm -rf dev/lib/*/data
-
+	@rm -rf dev/lib/*/etc
 
 ################################################################################
 # Misc
@@ -507,7 +486,7 @@ endif
 share/www:
 ifeq ($(with_fauxton), 1)
 	@echo "Building Fauxton"
-	@cd src/fauxton && npm install --production && ./node_modules/grunt-cli/bin/grunt couchdb
+	@cd src/fauxton && npm install && ./node_modules/grunt-cli/bin/grunt couchdb
 endif
 
 

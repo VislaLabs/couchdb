@@ -30,7 +30,6 @@
 
 -include_lib("couch/include/couch_db.hrl").
 -include_lib("couch_replicator/include/couch_replicator_api_wrap.hrl").
--include("couch_replicator_scheduler.hrl").
 -include("couch_replicator.hrl").
 
 -import(couch_util, [
@@ -320,9 +319,9 @@ handle_info(timeout, InitArgs) ->
     catch
         exit:{http_request_failed, _, _, max_backoff} ->
             {stop, {shutdown, max_backoff}, {error, InitArgs}};
-        Class:Error ->
+        ?STACKTRACE(Class, Error, Stack)
             ShutdownReason = {error, replication_start_error(Error)},
-            StackTop2 = lists:sublist(erlang:get_stacktrace(), 2),
+            StackTop2 = lists:sublist(Stack, 2),
             % Shutdown state is a hack as it is not really the state of the
             % gen_server (it failed to initialize, so it doesn't have one).
             % Shutdown state is used to pass extra info about why start failed.
@@ -1073,8 +1072,8 @@ scheduler_job_format_status_test() ->
         highest_seq_done = <<"5">>
     },
     Format = format_status(opts_ignored, [pdict, State]),
-    ?assertEqual("http://u:*****@h1/d1/", proplists:get_value(source, Format)),
-    ?assertEqual("http://u:*****@h2/d2/", proplists:get_value(target, Format)),
+    ?assertEqual("http://h1/d1/", proplists:get_value(source, Format)),
+    ?assertEqual("http://h2/d2/", proplists:get_value(target, Format)),
     ?assertEqual({"base", "+ext"}, proplists:get_value(rep_id, Format)),
     ?assertEqual([{create_target, true}], proplists:get_value(options, Format)),
     ?assertEqual(<<"mydoc">>, proplists:get_value(doc_id, Format)),

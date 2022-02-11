@@ -242,9 +242,8 @@ get_next_row(#collector{reducer = RedSrc} = St) when RedSrc =/= undefined ->
         collation = Collation
     } = St,
     {Key, RestKeys} = find_next_key(Keys, Dir, Collation, RowDict),
-    case dict:find(Key, RowDict) of
-    {ok, Records} ->
-        NewRowDict = dict:erase(Key, RowDict),
+    case reduce_row_dict_take(Key, RowDict, Collation) of
+    {Records, NewRowDict} ->
         Counters = lists:foldl(fun(#view_row{worker={Worker,From}}, CntrsAcc) ->
             case From of
                 {Pid, _} when is_pid(Pid) ->
@@ -268,6 +267,22 @@ get_next_row(State) ->
     rexi:stream_ack(From),
     Counters1 = fabric_dict:update_counter(Worker, -1, Counters0),
     {Row, State#collector{rows = Rest, counters=Counters1}}.
+
+reduce_row_dict_take(Key, Dict, <<"raw">>) ->
+    dict:take(Key, Dict);
+reduce_row_dict_take(Key, Dict, _Collation) ->
+    IsEq = fun(K, _) -> couch_ejson_compare:less(K, Key) =:= 0 end,
+    KVs = dict:to_list(dict:filter(IsEq, Dict)),
+    case KVs of
+        [] ->
+            error;
+        [_ | _] ->
+            {Keys, Vals} = lists:unzip(KVs),
+            NewDict = lists:foldl(fun(K, Acc) ->
+                dict:erase(K, Acc)
+            end, Dict, Keys),
+            {lists:flatten(Vals), NewDict}
+    end.
 
 %% TODO: rectify nil <-> undefined discrepancies
 find_next_key(nil, Dir, Collation, RowDict) ->
@@ -298,7 +313,6 @@ transform_row(#view_row{key=Key, id=_Id, value=_Value, doc={error,Reason}}) ->
 transform_row(#view_row{key=Key, id=Id, value=Value, doc=Doc}) ->
     {row, [{id,Id}, {key,Key}, {value,Value}, {doc,Doc}]}.
 
-compare(_, _, A, A) -> true;
 compare(fwd, <<"raw">>, A, B) -> A < B;
 compare(rev, <<"raw">>, A, B) -> B < A;
 compare(fwd, _, A, B) -> couch_ejson_compare:less_json(A, B);
