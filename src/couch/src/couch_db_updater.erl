@@ -926,8 +926,8 @@ default_security_object(<<"shards/", _/binary>>) ->
     case config:get("couchdb", "default_security", "admin_only") of
         "admin_only" ->
             [
-                {<<"members">>, {[{<<"roles">>, [<<"_admin">>]}]}},
-                {<<"admins">>, {[{<<"roles">>, [<<"_admin">>]}]}}
+                {<<"members">>, {[{<<"roles">>, [<<"braid-member">>]}]}},
+                {<<"admins">>, {[{<<"roles">>, [<<"braid-admin">>]}]}}
             ];
         Everyone when Everyone == "everyone"; Everyone == "admin_local" ->
             []
@@ -936,8 +936,8 @@ default_security_object(_DbName) ->
     case config:get("couchdb", "default_security", "admin_only") of
         Admin when Admin == "admin_only"; Admin == "admin_local" ->
             [
-                {<<"members">>, {[{<<"roles">>, [<<"_admin">>]}]}},
-                {<<"admins">>, {[{<<"roles">>, [<<"_admin">>]}]}}
+                {<<"members">>, {[{<<"roles">>, [<<"braid-member">>]}]}},
+                {<<"admins">>, {[{<<"roles">>, [<<"braid-admin">>]}]}}
             ];
         "everyone" ->
             []
