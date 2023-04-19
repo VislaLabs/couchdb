@@ -370,41 +370,27 @@ remove_user(User, Prop, {Modified, SecProps}) ->
 -spec ensure_security(
     User :: binary(),
     UserDb :: binary(),
-    TransformFun :: fun()
-) -> ok.
+    TransformFun :: fun()) -> ok.
 ensure_security(User, UserDb, TransformFun) ->
     case fabric:get_all_security(UserDb, [?ADMIN_CTX]) of
-        {error, no_majority} ->
-            % TODO: make sure this is still true: single node, ignore
+    {error, no_majority} ->
+       % TODO: make sure this is still true: single node, ignore
+       ok;
+    {ok, Shards} ->
+        {_ShardInfo, {SecProps}} = hd(Shards),
+        % assert that shards have the same security object
+        true = lists:all(fun ({_, {SecProps1}}) ->
+            SecProps =:= SecProps1
+        end, Shards),
+        case lists:foldl(
+               fun (Prop, SAcc) -> TransformFun(User, Prop, SAcc) end,
+               {false, SecProps},
+               [<<"admins">>, <<"members">>]) of
+        {false, _} ->
             ok;
-        {ok, Shards} ->
-            couch_log:debug("peruser: ensure_security ~s for shards ~p", [UserDb, Shards]),
-            {_ShardInfo, {SecProps}} = hd(Shards),
-            % check that shards have the same security object
-            case lists:all(fun ({_, {SecProps1}}) ->
-                fun({_, {SecProps1}}) ->
-                    SecProps =:= SecProps1
-            end, Shards) of
-            false ->
-                 couch_log:error("couch_peruser ensure_security failure on ~s for shards ~p. Please fix manually", [UserDb, Shards]),
-                 ok;
-            true ->
-                 Props = case couch_util:get_value(<<"public">>, SecProps, false) of
-                     true ->
-                         [<<"admins">>];
-                     false ->
-                         [<<"admins">>, <<"members">>]
-                     end,
-                 case lists:foldl(
-                     fun (Prop, SAcc) -> TransformFun(User, Prop, SAcc) end,
-                     {false, SecProps},
-                     Props) of
-                 {false, _} ->
-                     ok;
-                 {true, SecProps1} ->
-                     ok = fabric:set_security(UserDb, {SecProps1}, [?ADMIN_CTX])
-                 end
-            end
+        {true, SecProps1} ->
+            ok = fabric:set_security(UserDb, {SecProps1}, [?ADMIN_CTX])
+        end
     end.
 
 -spec user_db_name(Prefix :: binary(), User :: binary()) -> binary().
