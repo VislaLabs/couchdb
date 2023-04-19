@@ -139,7 +139,7 @@ init_state() ->
 start_listening(#state{states = ChangesStates} = State) when
     length(ChangesStates) > 0
 ->
-    % couch_log:debug("peruser: start_listening() already run on node ~p in pid ~p", [node(), self()]),
+    couch_log:debug("peruser: start_listening() already run on node ~p in pid ~p", [node(), self()]),
     State;
 start_listening(
     #state{
@@ -149,7 +149,7 @@ start_listening(
         peruser_dbname_prefix = Prefix
     } = State
 ) ->
-    % couch_log:debug("peruser: start_listening() on node ~p", [node()]),
+    couch_log:debug("peruser: start_listening() on node ~p", [node()]),
     try
         States = lists:map(
             fun(A) ->
@@ -167,7 +167,7 @@ start_listening(
             end,
             mem3:local_shards(DbName)
         ),
-        % couch_log:debug("peruser: start_listening() States ~p", [States]),
+        couch_log:debug("peruser: start_listening() States ~p", [States]),
 
         State#state{states = States, cluster_stable = true}
     catch
@@ -186,7 +186,7 @@ start_listening(
 
 -spec init_changes_handler(ChangesState :: #changes_state{}) -> ok.
 init_changes_handler(#changes_state{db_name = DbName} = ChangesState) ->
-    % couch_log:debug("peruser: init_changes_handler() on DbName ~p", [DbName]),
+    couch_log:debug("peruser: init_changes_handler() on DbName ~p", [DbName]),
     ioq:set_io_priority({system, DbName}),
     try
         {ok, Db} = couch_db:open_int(DbName, [?ADMIN_CTX, sys_db]),
@@ -218,7 +218,7 @@ changes_handler(
         peruser_dbname_prefix = Prefix
     }
 ) ->
-    % couch_log:debug("peruser: changes_handler() on DbName/Doc ~p/~p", [DbName, Doc]),
+    couch_log:debug("peruser: changes_handler() on DbName/Doc ~p/~p", [DbName, Doc]),
 
     case couch_util:get_value(<<"id">>, Doc) of
         <<"org.couchdb.user:", User/binary>> = DocId ->
@@ -370,34 +370,33 @@ remove_user(User, Prop, {Modified, SecProps}) ->
 -spec ensure_security(
     User :: binary(),
     UserDb :: binary(),
-    TransformFun :: fun()
-) -> ok.
+    TransformFun :: fun()) -> ok.
 ensure_security(User, UserDb, TransformFun) ->
     case fabric:get_all_security(UserDb, [?ADMIN_CTX]) of
-        {error, no_majority} ->
-            % TODO: make sure this is still true: single node, ignore
+    {error, no_majority} ->
+       % TODO: make sure this is still true: single node, ignore
+       ok;
+    {ok, Shards} ->
+        couch_log:debug("peruser: ensure_security ~s for shards ~p", [UserDb, Shards]),
+        {_ShardInfo, {SecProps}} = hd(Shards),
+        % check that shards have the same security object
+        case lists:all(fun ({_, {SecProps1}}) ->
+            SecProps =:= SecProps1
+        end, Shards) of
+        false ->
+            couch_log:error("couch_peruser ensure_security failure on ~s for shards ~p. Please fix manually", [UserDb, Shards]),
             ok;
-        {ok, Shards} ->
-            {_ShardInfo, {SecProps}} = hd(Shards),
-            % assert that shards have the same security object
-            true = lists:all(
-                fun({_, {SecProps1}}) ->
-                    SecProps =:= SecProps1
-                end,
-                Shards
-            ),
-            case
-                lists:foldl(
-                    fun(Prop, SAcc) -> TransformFun(User, Prop, SAcc) end,
-                    {false, SecProps},
-                    [<<"admins">>, <<"members">>]
-                )
-            of
-                {false, _} ->
-                    ok;
-                {true, SecProps1} ->
-                    ok = fabric:set_security(UserDb, {SecProps1}, [?ADMIN_CTX])
+        true ->
+        case lists:foldl(
+               fun (Prop, SAcc) -> TransformFun(User, Prop, SAcc) end,
+               {false, SecProps},
+               [<<"admins">>, <<"members">>]) of
+        {false, _} ->
+            ok;
+        {true, SecProps1} ->
+            ok = fabric:set_security(UserDb, {SecProps1}, [?ADMIN_CTX])
             end
+        end
     end.
 
 -spec user_db_name(Prefix :: binary(), User :: binary()) -> binary().
