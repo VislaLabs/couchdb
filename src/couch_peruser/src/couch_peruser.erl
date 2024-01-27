@@ -192,7 +192,7 @@ init_changes_handler(#changes_state{db_name = DbName} = ChangesState) ->
         {ok, Db} = couch_db:open_int(DbName, [?ADMIN_CTX, sys_db]),
         FunAcc = {fun ?MODULE:changes_handler/3, ChangesState},
         (couch_changes:handle_db_changes(
-            #changes_args{feed = "continuous", timeout = infinity},
+            #changes_args{feed = "continuous", timeout = infinity, since = couch_db:get_update_seq(Db)},
             {json_req, null},
             Db
         ))(
