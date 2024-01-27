@@ -26,6 +26,7 @@
 -define(REVA, <<"a">>).
 -define(REVB, <<"b">>).
 -define(REVC, <<"c">>).
+-define(REVD, <<"d">>).
 -define(DELETED, true).
 -define(LEAFREV, false).
 
@@ -40,6 +41,7 @@ test_docs() ->
         {?DOC3, [?REVA], ?LEAFREV},
         {?DOC1, [?REVB, ?REVA], ?LEAFREV},
         {?DOC1, [?REVC, ?REVA], ?LEAFREV},
+        {?DOC1, [?REVD, ?REVA], ?DELETED},
         {?DOC3, [?REVB, ?REVA], ?DELETED},
         {?DDOC2, [?REVC, ?REVA], ?LEAFREV}
     ].
@@ -104,11 +106,11 @@ changes_q8_test_() ->
         ])
     }.
 
-% These tests are separate as they create aditional design docs during
+% These tests are separate as they create additional design docs during
 % the test. That ends up bumping the update sequence in the db, so
 % last_seq and other sequences returned become dependent on the test
 % order.  To avoid that dependence, run them in a separate suite with
-% a foreach construct insted of a setup one. This way setup/teardown
+% a foreach construct instead of a setup one. This way setup/teardown
 % happens for each individual test case.
 %
 changes_js_filters_test_() ->
@@ -125,15 +127,41 @@ changes_js_filters_test_() ->
         ]
     }.
 
+changes_include_docs_test_() ->
+    {
+        foreach,
+        fun setup_basic/0,
+        fun teardown_basic/1,
+        [
+            ?TDEF_FE(t_include_docs),
+            ?TDEF_FE(t_all_docs_include_docs),
+            ?TDEF_FE(t_selector_include_docs),
+            ?TDEF_FE(t_selector_all_docs_include_docs),
+            ?TDEF_FE(t_conflicts),
+            ?TDEF_FE(t_conflicts_all_docs),
+            ?TDEF_FE(t_conflicts_include_docs),
+            ?TDEF_FE(t_conflicts_all_docs_include_docs),
+            ?TDEF_FE(t_conflicts_selector_include_docs),
+            ?TDEF_FE(t_conflicts_selector_all_docs_include_docs),
+            ?TDEF_FE(t_js_filter_include_docs),
+            ?TDEF_FE(t_js_filter_conflicts_include_docs),
+            ?TDEF_FE(t_js_filter_all_docs_conflicts_include_docs1),
+            ?TDEF_FE(t_js_filter_all_docs_conflicts_include_docs2),
+            ?TDEF_FE(t_view_include_docs),
+            ?TDEF_FE(t_view_conflicts_include_docs),
+            ?TDEF_FE(t_view_all_docs_conflicts_include_docs)
+        ]
+    }.
+
 t_basic({_, DbUrl}) ->
     Res = {Seq, Pending, Rows} = changes(DbUrl),
-    ?assertEqual(7, Seq),
+    ?assertEqual(8, Seq),
     ?assertEqual(0, Pending),
     ?assertEqual(
         [
-            {5, {?DOC1, <<"2-c">>}, ?LEAFREV},
-            {6, {?DOC3, <<"2-b">>}, ?DELETED},
-            {7, {?DDOC2, <<"2-c">>}, ?LEAFREV}
+            {6, {?DOC1, <<"2-c">>}, ?LEAFREV},
+            {7, {?DOC3, <<"2-b">>}, ?DELETED},
+            {8, {?DDOC2, <<"2-c">>}, ?LEAFREV}
         ],
         Rows
     ),
@@ -142,7 +170,7 @@ t_basic({_, DbUrl}) ->
 
 t_basic_q8({_, DbUrl}) ->
     {Seq, Pending, Rows} = changes(DbUrl),
-    ?assertEqual(7, Seq),
+    ?assertEqual(8, Seq),
     ?assertEqual(0, Pending),
     {Seqs, Revs, _Deleted} = lists:unzip3(Rows),
     ?assertEqual(
@@ -157,13 +185,13 @@ t_basic_q8({_, DbUrl}) ->
 
 t_basic_post({_, DbUrl}) ->
     {Seq, Pending, Rows} = changes_post(DbUrl, #{}),
-    ?assertEqual(7, Seq),
+    ?assertEqual(8, Seq),
     ?assertEqual(0, Pending),
     ?assertEqual(
         [
-            {5, {?DOC1, <<"2-c">>}, ?LEAFREV},
-            {6, {?DOC3, <<"2-b">>}, ?DELETED},
-            {7, {?DDOC2, <<"2-c">>}, ?LEAFREV}
+            {6, {?DOC1, <<"2-c">>}, ?LEAFREV},
+            {7, {?DOC3, <<"2-b">>}, ?DELETED},
+            {8, {?DDOC2, <<"2-c">>}, ?LEAFREV}
         ],
         Rows
     ).
@@ -171,13 +199,13 @@ t_basic_post({_, DbUrl}) ->
 t_continuous({_, DbUrl}) ->
     Params = "?feed=continuous&timeout=10",
     {Seq, Pending, Rows} = changes(DbUrl, Params),
-    ?assertEqual(7, Seq),
+    ?assertEqual(8, Seq),
     ?assertEqual(0, Pending),
     ?assertEqual(
         [
-            {5, {?DOC1, <<"2-c">>}, ?LEAFREV},
-            {6, {?DOC3, <<"2-b">>}, ?DELETED},
-            {7, {?DDOC2, <<"2-c">>}, ?LEAFREV}
+            {6, {?DOC1, <<"2-c">>}, ?LEAFREV},
+            {7, {?DOC3, <<"2-b">>}, ?DELETED},
+            {8, {?DDOC2, <<"2-c">>}, ?LEAFREV}
         ],
         Rows
     ).
@@ -185,7 +213,7 @@ t_continuous({_, DbUrl}) ->
 t_continuous_q8({_, DbUrl}) ->
     Params = "?feed=continuous&timeout=10",
     {Seq, Pending, Rows} = changes(DbUrl, Params),
-    ?assertEqual(7, Seq),
+    ?assertEqual(8, Seq),
     ?assertEqual(0, Pending),
     {Seqs, Revs, _Deleted} = lists:unzip3(Rows),
     ?assertEqual(
@@ -201,13 +229,13 @@ t_continuous_q8({_, DbUrl}) ->
 t_continuous_zero_timeout({_, DbUrl}) ->
     Params = "?feed=continuous&timeout=0",
     {Seq, Pending, Rows} = changes(DbUrl, Params),
-    ?assertEqual(7, Seq),
+    ?assertEqual(8, Seq),
     ?assertEqual(0, Pending),
     ?assertEqual(
         [
-            {5, {?DOC1, <<"2-c">>}, ?LEAFREV},
-            {6, {?DOC3, <<"2-b">>}, ?DELETED},
-            {7, {?DDOC2, <<"2-c">>}, ?LEAFREV}
+            {6, {?DOC1, <<"2-c">>}, ?LEAFREV},
+            {7, {?DOC3, <<"2-b">>}, ?DELETED},
+            {8, {?DDOC2, <<"2-c">>}, ?LEAFREV}
         ],
         Rows
     ).
@@ -215,13 +243,13 @@ t_continuous_zero_timeout({_, DbUrl}) ->
 t_longpoll({_, DbUrl}) ->
     Params = "?feed=longpoll",
     {Seq, Pending, Rows} = changes(DbUrl, Params),
-    ?assertEqual(7, Seq),
+    ?assertEqual(8, Seq),
     ?assertEqual(0, Pending),
     ?assertEqual(
         [
-            {5, {?DOC1, <<"2-c">>}, ?LEAFREV},
-            {6, {?DOC3, <<"2-b">>}, ?DELETED},
-            {7, {?DDOC2, <<"2-c">>}, ?LEAFREV}
+            {6, {?DOC1, <<"2-c">>}, ?LEAFREV},
+            {7, {?DOC3, <<"2-b">>}, ?DELETED},
+            {8, {?DDOC2, <<"2-c">>}, ?LEAFREV}
         ],
         Rows
     ).
@@ -237,8 +265,8 @@ t_continuous_limit_zero({_, DbUrl}) ->
 t_limit_one({_, DbUrl}) ->
     Params = "?limit=1",
     ?assertEqual(
-        {5, 2, [
-            {5, {?DOC1, <<"2-c">>}, ?LEAFREV}
+        {6, 2, [
+            {6, {?DOC1, <<"2-c">>}, ?LEAFREV}
         ]},
         changes(DbUrl, Params)
     ).
@@ -255,39 +283,39 @@ t_limit_one_q8({_, DbUrl}) ->
 t_style_all_docs({_, DbUrl}) ->
     Params = "?style=all_docs",
     {Seq, Pending, Rows} = changes(DbUrl, Params),
-    ?assertEqual(7, Seq),
+    ?assertEqual(8, Seq),
     ?assertEqual(0, Pending),
     ?assertEqual(
         [
-            {5, {?DOC1, [<<"2-c">>, <<"2-b">>]}, ?LEAFREV},
-            {6, {?DOC3, <<"2-b">>}, ?DELETED},
-            {7, {?DDOC2, <<"2-c">>}, ?LEAFREV}
+            {6, {?DOC1, [<<"2-c">>, <<"2-b">>, <<"2-d">>]}, ?LEAFREV},
+            {7, {?DOC3, <<"2-b">>}, ?DELETED},
+            {8, {?DDOC2, <<"2-c">>}, ?LEAFREV}
         ],
         Rows
     ).
 
 t_since_now({_, DbUrl}) ->
     Params = "?since=now",
-    ?assertEqual({7, 0, []}, changes(DbUrl, Params)).
+    ?assertEqual({8, 0, []}, changes(DbUrl, Params)).
 
 t_continuous_since_now({_, DbUrl}) ->
     Params = "?feed=continuous&timeout=10&since=now",
-    ?assertEqual({7, 0, []}, changes(DbUrl, Params)).
+    ?assertEqual({8, 0, []}, changes(DbUrl, Params)).
 
 t_longpoll_since_now({_, DbUrl}) ->
     Params = "?feed=longpoll&timeout=10&since=now",
-    ?assertEqual({7, 0, []}, changes(DbUrl, Params)).
+    ?assertEqual({8, 0, []}, changes(DbUrl, Params)).
 
 t_reverse({_, DbUrl}) ->
     Params = "?descending=true",
     {Seq, Pending, Rows} = changes(DbUrl, Params),
-    ?assertEqual(5, Seq),
-    ?assertEqual(-3, Pending),
+    ?assertEqual(6, Seq),
+    ?assertEqual(0, Pending),
     ?assertEqual(
         [
-            {7, {?DDOC2, <<"2-c">>}, ?LEAFREV},
-            {6, {?DOC3, <<"2-b">>}, ?DELETED},
-            {5, {?DOC1, <<"2-c">>}, ?LEAFREV}
+            {8, {?DDOC2, <<"2-c">>}, ?LEAFREV},
+            {7, {?DOC3, <<"2-b">>}, ?DELETED},
+            {6, {?DOC1, <<"2-c">>}, ?LEAFREV}
         ],
         Rows
     ).
@@ -295,13 +323,13 @@ t_reverse({_, DbUrl}) ->
 t_continuous_reverse({_, DbUrl}) ->
     Params = "?feed=continuous&timeout=10&descending=true",
     {Seq, Pending, Rows} = changes(DbUrl, Params),
-    ?assertEqual(5, Seq),
-    ?assertEqual(-3, Pending),
+    ?assertEqual(6, Seq),
+    ?assertEqual(0, Pending),
     ?assertEqual(
         [
-            {7, {?DDOC2, <<"2-c">>}, ?LEAFREV},
-            {6, {?DOC3, <<"2-b">>}, ?DELETED},
-            {5, {?DOC1, <<"2-c">>}, ?LEAFREV}
+            {8, {?DDOC2, <<"2-c">>}, ?LEAFREV},
+            {7, {?DOC3, <<"2-b">>}, ?DELETED},
+            {6, {?DOC1, <<"2-c">>}, ?LEAFREV}
         ],
         Rows
     ).
@@ -309,8 +337,8 @@ t_continuous_reverse({_, DbUrl}) ->
 t_reverse_q8({_, DbUrl}) ->
     Params = "?descending=true",
     {Seq, Pending, Rows} = changes(DbUrl, Params),
-    ?assertEqual(7, Seq),
-    ?assertEqual(-3, Pending),
+    ?assertEqual(8, Seq),
+    ?assertEqual(0, Pending),
     {Seqs, Revs, _Deleted} = lists:unzip3(Rows),
     ?assertEqual(
         [
@@ -324,13 +352,13 @@ t_reverse_q8({_, DbUrl}) ->
 
 t_reverse_limit_zero({_, DbUrl}) ->
     Params = "?descending=true&limit=0",
-    ?assertEqual({7, 0, []}, changes(DbUrl, Params)).
+    ?assertEqual({8, 3, []}, changes(DbUrl, Params)).
 
 t_reverse_limit_one({_, DbUrl}) ->
     Params = "?descending=true&limit=1",
     ?assertEqual(
-        {7, -1, [
-            {7, {?DDOC2, <<"2-c">>}, ?LEAFREV}
+        {8, 2, [
+            {8, {?DDOC2, <<"2-c">>}, ?LEAFREV}
         ]},
         changes(DbUrl, Params)
     ).
@@ -338,7 +366,7 @@ t_reverse_limit_one({_, DbUrl}) ->
 t_reverse_limit_one_q8({_, DbUrl}) ->
     Params = "?descending=true&limit=1",
     ?assertMatch(
-        {7, -1, [
+        {8, 2, [
             {_, {<<_/binary>>, <<_/binary>>}, _}
         ]},
         changes(DbUrl, Params)
@@ -347,12 +375,12 @@ t_reverse_limit_one_q8({_, DbUrl}) ->
 t_seq_interval({_, DbUrl}) ->
     Params = "?seq_interval=3",
     {Seq, Pending, Rows} = changes(DbUrl, Params),
-    ?assertEqual(7, Seq),
+    ?assertEqual(8, Seq),
     ?assertEqual(0, Pending),
     ?assertEqual(
         [
             {null, {?DOC1, <<"2-c">>}, ?LEAFREV},
-            {6, {?DOC3, <<"2-b">>}, ?DELETED},
+            {7, {?DOC3, <<"2-b">>}, ?DELETED},
             {null, {?DDOC2, <<"2-c">>}, ?LEAFREV}
         ],
         Rows
@@ -362,14 +390,14 @@ t_selector_filter({_, DbUrl}) ->
     Params = "?filter=_selector",
     Body = #{<<"selector">> => #{<<"_id">> => ?DOC1}},
     {Seq, Pending, Rows} = changes_post(DbUrl, Body, Params),
-    ?assertEqual(7, Seq),
+    ?assertEqual(8, Seq),
     ?assertEqual(0, Pending),
     ?assertMatch([{_, {?DOC1, <<"2-c">>}, ?LEAFREV}], Rows).
 
 t_design_filter({_, DbUrl}) ->
     Params = "?filter=_design",
     {Seq, Pending, Rows} = changes(DbUrl, Params),
-    ?assertEqual(7, Seq),
+    ?assertEqual(8, Seq),
     ?assertEqual(2, Pending),
     ?assertMatch([{_, {?DDOC2, <<"2-c">>}, ?LEAFREV}], Rows).
 
@@ -381,8 +409,8 @@ t_docs_id_filter({_, DbUrl}) ->
     ?assertEqual(1, meck:num_calls(couch_changes, send_changes_doc_ids, 6)),
     ?assertEqual(
         [
-            {5, {?DOC1, <<"2-c">>}, ?LEAFREV},
-            {6, {?DOC3, <<"2-b">>}, ?DELETED}
+            {6, {?DOC1, <<"2-c">>}, ?LEAFREV},
+            {7, {?DOC3, <<"2-b">>}, ?DELETED}
         ],
         Rows
     ).
@@ -409,8 +437,8 @@ t_docs_id_filter_over_limit({_, DbUrl}) ->
     ?assertEqual(0, meck:num_calls(couch_changes, send_changes_doc_ids, 6)),
     ?assertEqual(
         [
-            {5, {?DOC1, <<"2-c">>}, ?LEAFREV},
-            {6, {?DOC3, <<"2-b">>}, ?DELETED}
+            {6, {?DOC1, <<"2-c">>}, ?LEAFREV},
+            {7, {?DOC3, <<"2-b">>}, ?DELETED}
         ],
         Rows
     ).
@@ -423,15 +451,15 @@ t_js_filter({_, DbUrl}) ->
     {_, #{<<"rev">> := Rev, <<"ok">> := true}} = req(put, DDocUrl, DDoc),
     Params = "?filter=filters/f",
     {Seq, Pending, Rows} = changes(DbUrl, Params),
-    ?assertEqual(8, Seq),
+    ?assertEqual(9, Seq),
     ?assertEqual(0, Pending),
     ?assertEqual(
         [
-            {6, {?DOC3, <<"2-b">>}, ?DELETED}
+            {7, {?DOC3, <<"2-b">>}, ?DELETED}
         ],
         Rows
     ),
-    {200, #{}} = req(delete, DDocUrl ++ "?rev=" ++ binary_to_list(Rev)).
+    delete_ddocs(DDocUrl, Rev).
 
 t_js_filter_no_match({_, DbUrl}) ->
     DDocId = "_design/filters",
@@ -440,8 +468,8 @@ t_js_filter_no_match({_, DbUrl}) ->
     DDocUrl = DbUrl ++ "/" ++ DDocId,
     {_, #{<<"rev">> := Rev, <<"ok">> := true}} = req(put, DDocUrl, DDoc),
     Params = "?filter=filters/f",
-    ?assertEqual({8, 0, []}, changes(DbUrl, Params)),
-    {200, #{}} = req(delete, DDocUrl ++ "?rev=" ++ binary_to_list(Rev)).
+    ?assertEqual({9, 0, []}, changes(DbUrl, Params)),
+    delete_ddocs(DDocUrl, Rev).
 
 t_js_filter_with_query_param({_, DbUrl}) ->
     DDocId = "_design/filters",
@@ -451,46 +479,379 @@ t_js_filter_with_query_param({_, DbUrl}) ->
     {_, #{<<"rev">> := Rev, <<"ok">> := true}} = req(put, DDocUrl, DDoc),
     Params = "?filter=filters/f&yup=1",
     {Seq, Pending, Rows} = changes(DbUrl, Params),
-    ?assertEqual(8, Seq),
+    ?assertEqual(9, Seq),
     ?assertEqual(0, Pending),
     ?assertMatch(
         [
-            {5, {?DOC1, <<"2-c">>}, ?LEAFREV},
-            {6, {?DOC3, <<"2-b">>}, ?DELETED},
-            {7, {?DDOC2, <<"2-c">>}, ?LEAFREV},
-            {8, {<<"_design/filters">>, <<"1-", _/binary>>}, ?LEAFREV}
+            {6, {?DOC1, <<"2-c">>}, ?LEAFREV},
+            {7, {?DOC3, <<"2-b">>}, ?DELETED},
+            {8, {?DDOC2, <<"2-c">>}, ?LEAFREV},
+            {9, {<<"_design/filters">>, <<"1-", _/binary>>}, ?LEAFREV}
         ],
         Rows
     ),
-    {200, #{}} = req(delete, DDocUrl ++ "?rev=" ++ binary_to_list(Rev)).
+    delete_ddocs(DDocUrl, Rev).
 
 t_view_filter({_, DbUrl}) ->
-    DDocId = "_design/views",
-    ViewFun = <<"function(doc) {if (doc._id == 'doc1') {emit(1, 1);}}">>,
-    DDoc = #{<<"views">> => #{<<"v">> => #{<<"map">> => ViewFun}}},
-    DDocUrl = DbUrl ++ "/" ++ DDocId,
-    {_, #{<<"rev">> := Rev, <<"ok">> := true}} = req(put, DDocUrl, DDoc),
+    {DDocUrl, Rev} = create_ddocs(DbUrl, ?DOC1, view),
     Params = "?filter=_view&view=views/v",
     {Seq, Pending, Rows} = changes(DbUrl, Params),
-    ?assertEqual(8, Seq),
+    ?assertEqual(9, Seq),
     ?assertEqual(0, Pending),
-    ?assertEqual(
-        [
-            {5, {?DOC1, <<"2-c">>}, ?LEAFREV}
-        ],
-        Rows
-    ),
-    {200, #{}} = req(delete, DDocUrl ++ "?rev=" ++ binary_to_list(Rev)).
+    ?assertEqual([{6, {?DOC1, <<"2-c">>}, ?LEAFREV}], Rows),
+    delete_ddocs(DDocUrl, Rev).
 
 t_view_filter_no_match({_, DbUrl}) ->
-    DDocId = "_design/views",
-    ViewFun = <<"function(doc) {if (doc._id == 'docX') {emit(1, 1);}}">>,
-    DDoc = #{<<"views">> => #{<<"v">> => #{<<"map">> => ViewFun}}},
-    DDocUrl = DbUrl ++ "/" ++ DDocId,
-    {_, #{<<"rev">> := Rev, <<"ok">> := true}} = req(put, DDocUrl, DDoc),
+    {DDocUrl, Rev} = create_ddocs(DbUrl, <<"docX">>, view),
     Params = "?filter=_view&view=views/v",
-    ?assertEqual({8, 0, []}, changes(DbUrl, Params)),
-    {200, #{}} = req(delete, DDocUrl ++ "?rev=" ++ binary_to_list(Rev)).
+    ?assertEqual({9, 0, []}, changes(DbUrl, Params)),
+    delete_ddocs(DDocUrl, Rev).
+
+t_include_docs({_, DbUrl}) ->
+    Params = "?include_docs=true",
+    {200, #{<<"results">> := Res1}} = req(get, DbUrl ++ "/_changes" ++ Params),
+    ?assertMatch(
+        [
+            #{
+                <<"changes">> := [#{<<"rev">> := <<"2-c">>}],
+                <<"doc">> := #{<<"_id">> := ?DOC1, <<"_rev">> := <<"2-c">>}
+            },
+            #{
+                <<"changes">> := [#{<<"rev">> := <<"2-b">>}],
+                <<"deleted">> := ?DELETED,
+                <<"doc">> := #{
+                    <<"_id">> := ?DOC3, <<"_rev">> := <<"2-b">>, <<"_deleted">> := ?DELETED
+                }
+            },
+            #{
+                <<"changes">> := [#{<<"rev">> := <<"2-c">>}],
+                <<"doc">> := #{<<"_id">> := ?DDOC2, <<"_rev">> := <<"2-c">>}
+            }
+        ],
+        Res1
+    ),
+    {200, #{<<"results">> := Res2}} = req(post, DbUrl ++ "/_changes" ++ Params),
+    ?assertEqual(Res1, Res2).
+
+t_all_docs_include_docs({_, DbUrl}) ->
+    Params = "?style=all_docs&include_docs=true",
+    {200, #{<<"results">> := Res1}} = req(get, DbUrl ++ "/_changes" ++ Params),
+    ?assertMatch(
+        [
+            #{
+                <<"changes">> := [
+                    #{<<"rev">> := <<"2-c">>}, #{<<"rev">> := <<"2-b">>}, #{<<"rev">> := <<"2-d">>}
+                ],
+                <<"doc">> := #{<<"_id">> := ?DOC1, <<"_rev">> := <<"2-c">>}
+            },
+            #{
+                <<"changes">> := [#{<<"rev">> := <<"2-b">>}],
+                <<"deleted">> := ?DELETED,
+                <<"doc">> := #{
+                    <<"_id">> := ?DOC3, <<"_rev">> := <<"2-b">>, <<"_deleted">> := ?DELETED
+                }
+            },
+            #{
+                <<"changes">> := [#{<<"rev">> := <<"2-c">>}],
+                <<"doc">> := #{<<"_id">> := ?DDOC2, <<"_rev">> := <<"2-c">>}
+            }
+        ],
+        Res1
+    ),
+    {200, #{<<"results">> := Res2}} = req(post, DbUrl ++ "/_changes" ++ Params),
+    ?assertEqual(Res1, Res2).
+
+t_selector_include_docs({_, DbUrl}) ->
+    Body = #{<<"selector">> => #{<<"_id">> => ?DOC1}},
+    Params = "?filter=_selector&include_docs=true",
+    {200, #{<<"results">> := Res}} = req(post, DbUrl ++ "/_changes" ++ Params, Body),
+    ?assertMatch(
+        [
+            #{
+                <<"changes">> := [#{<<"rev">> := <<"2-c">>}],
+                <<"doc">> := #{<<"_id">> := ?DOC1, <<"_rev">> := <<"2-c">>}
+            }
+        ],
+        Res
+    ).
+
+t_selector_all_docs_include_docs({_, DbUrl}) ->
+    Body = #{<<"selector">> => #{<<"_id">> => ?DOC1}},
+    Params = "?filter=_selector&style=all_docs&include_docs=true",
+    {200, #{<<"results">> := Res}} = req(post, DbUrl ++ "/_changes" ++ Params, Body),
+    ?assertMatch(
+        [
+            #{
+                <<"changes">> := [
+                    #{<<"rev">> := <<"2-c">>}, #{<<"rev">> := <<"2-b">>}, #{<<"rev">> := <<"2-d">>}
+                ],
+                <<"doc">> := #{<<"_id">> := ?DOC1, <<"_rev">> := <<"2-c">>}
+            }
+        ],
+        Res
+    ).
+
+t_conflicts({_, DbUrl}) ->
+    Params = "?conflicts=true",
+    {200, #{<<"results">> := Res1}} = req(get, DbUrl ++ "/_changes" ++ Params),
+    ?assertMatch(
+        [
+            #{<<"changes">> := [#{<<"rev">> := <<"2-c">>}]},
+            #{<<"changes">> := [#{<<"rev">> := <<"2-b">>}]},
+            #{<<"changes">> := [#{<<"rev">> := <<"2-c">>}]}
+        ],
+        Res1
+    ),
+    {200, #{<<"results">> := Res2}} = req(post, DbUrl ++ "/_changes" ++ Params),
+    ?assertEqual(Res1, Res2).
+
+t_conflicts_all_docs({_, DbUrl}) ->
+    Params = "?conflicts=true&style=all_docs",
+    {200, #{<<"results">> := Res1}} = req(get, DbUrl ++ "/_changes" ++ Params),
+    ?assertMatch(
+        [
+            #{
+                <<"changes">> := [
+                    #{<<"rev">> := <<"2-c">>}, #{<<"rev">> := <<"2-b">>}, #{<<"rev">> := <<"2-d">>}
+                ]
+            },
+            #{<<"changes">> := [#{<<"rev">> := <<"2-b">>}]},
+            #{<<"changes">> := [#{<<"rev">> := <<"2-c">>}]}
+        ],
+        Res1
+    ),
+    {200, #{<<"results">> := Res2}} = req(post, DbUrl ++ "/_changes" ++ Params),
+    ?assertEqual(Res1, Res2).
+
+t_conflicts_include_docs({_, DbUrl}) ->
+    Params = "?conflicts=true&include_docs=true",
+    {200, #{<<"results">> := Res1}} = req(get, DbUrl ++ "/_changes" ++ Params),
+    ?assertMatch(
+        [
+            #{
+                <<"changes">> := [#{<<"rev">> := <<"2-c">>}],
+                <<"doc">> := #{
+                    <<"_id">> := ?DOC1, <<"_rev">> := <<"2-c">>, <<"_conflicts">> := [<<"2-b">>]
+                }
+            },
+            #{
+                <<"changes">> := [#{<<"rev">> := <<"2-b">>}],
+                <<"deleted">> := ?DELETED,
+                <<"doc">> := #{
+                    <<"_id">> := ?DOC3, <<"_rev">> := <<"2-b">>, <<"_deleted">> := ?DELETED
+                }
+            },
+            #{
+                <<"changes">> := [#{<<"rev">> := <<"2-c">>}],
+                <<"doc">> := #{<<"_id">> := ?DDOC2, <<"_rev">> := <<"2-c">>}
+            }
+        ],
+        Res1
+    ),
+    {200, #{<<"results">> := Res2}} = req(post, DbUrl ++ "/_changes" ++ Params),
+    ?assertEqual(Res1, Res2).
+
+t_conflicts_all_docs_include_docs({_, DbUrl}) ->
+    Params = "?conflicts=true&style=all_docs&include_docs=true",
+    {200, #{<<"results">> := Res1}} = req(get, DbUrl ++ "/_changes" ++ Params),
+    ?assertMatch(
+        [
+            #{
+                <<"changes">> := [
+                    #{<<"rev">> := <<"2-c">>}, #{<<"rev">> := <<"2-b">>}, #{<<"rev">> := <<"2-d">>}
+                ],
+                <<"doc">> := #{
+                    <<"_id">> := ?DOC1, <<"_rev">> := <<"2-c">>, <<"_conflicts">> := [<<"2-b">>]
+                }
+            },
+            #{
+                <<"changes">> := [#{<<"rev">> := <<"2-b">>}],
+                <<"deleted">> := ?DELETED,
+                <<"doc">> := #{
+                    <<"_id">> := ?DOC3, <<"_rev">> := <<"2-b">>, <<"_deleted">> := ?DELETED
+                }
+            },
+            #{
+                <<"changes">> := [#{<<"rev">> := <<"2-c">>}],
+                <<"doc">> := #{<<"_id">> := ?DDOC2, <<"_rev">> := <<"2-c">>}
+            }
+        ],
+        Res1
+    ),
+    {200, #{<<"results">> := Res2}} = req(post, DbUrl ++ "/_changes" ++ Params),
+    ?assertEqual(Res1, Res2).
+
+t_conflicts_selector_include_docs({_, DbUrl}) ->
+    Body = #{<<"selector">> => #{<<"_id">> => ?DOC1}},
+    Params = "?conflicts=true&filter=_selector&include_docs=true",
+    {200, #{<<"results">> := Res}} = req(post, DbUrl ++ "/_changes" ++ Params, Body),
+    ?assertMatch(
+        [
+            #{
+                <<"changes">> := [#{<<"rev">> := <<"2-c">>}],
+                <<"doc">> := #{
+                    <<"_id">> := ?DOC1, <<"_rev">> := <<"2-c">>, <<"_conflicts">> := [<<"2-b">>]
+                }
+            }
+        ],
+        Res
+    ).
+
+t_conflicts_selector_all_docs_include_docs({_, DbUrl}) ->
+    Body = #{<<"selector">> => #{<<"_id">> => ?DOC1}},
+    Params = "?conflicts=true&filter=_selector&style=all_docs&include_docs=true",
+    {200, #{<<"results">> := Res}} = req(post, DbUrl ++ "/_changes" ++ Params, Body),
+    ?assertMatch(
+        [
+            #{
+                <<"changes">> := [
+                    #{<<"rev">> := <<"2-c">>}, #{<<"rev">> := <<"2-b">>}, #{<<"rev">> := <<"2-d">>}
+                ],
+                <<"doc">> := #{
+                    <<"_id">> := ?DOC1, <<"_rev">> := <<"2-c">>, <<"_conflicts">> := [<<"2-b">>]
+                }
+            }
+        ],
+        Res
+    ).
+
+t_js_filter_include_docs({_, DbUrl}) ->
+    {DDocUrl, Rev} = create_ddocs(DbUrl, ?DOC3, custom),
+    Params = "?filter=filters/f&include_docs=true",
+    {200, #{<<"results">> := Res1}} = req(get, DbUrl ++ "/_changes" ++ Params),
+    ?assertMatch(
+        [
+            #{
+                <<"changes">> := [#{<<"rev">> := <<"2-b">>}],
+                <<"deleted">> := ?DELETED,
+                <<"doc">> := #{
+                    <<"_id">> := ?DOC3, <<"_rev">> := <<"2-b">>, <<"_deleted">> := ?DELETED
+                }
+            }
+        ],
+        Res1
+    ),
+    {200, #{<<"results">> := Res2}} = req(post, DbUrl ++ "/_changes" ++ Params),
+    ?assertEqual(Res1, Res2),
+    delete_ddocs(DDocUrl, Rev).
+
+t_js_filter_conflicts_include_docs({_, DbUrl}) ->
+    {DDocUrl, Rev} = create_ddocs(DbUrl, ?DOC3, custom),
+    Params = "?filter=filters/f&conflicts=true&include_docs=true",
+    {200, #{<<"results">> := Res1}} = req(get, DbUrl ++ "/_changes" ++ Params),
+    ?assertMatch(
+        [
+            #{
+                <<"changes">> := [#{<<"rev">> := <<"2-b">>}],
+                <<"deleted">> := ?DELETED,
+                <<"doc">> := #{
+                    <<"_id">> := ?DOC3, <<"_rev">> := <<"2-b">>, <<"_deleted">> := ?DELETED
+                }
+            }
+        ],
+        Res1
+    ),
+    {200, #{<<"results">> := Res2}} = req(post, DbUrl ++ "/_changes" ++ Params),
+    ?assertEqual(Res1, Res2),
+    delete_ddocs(DDocUrl, Rev).
+
+t_js_filter_all_docs_conflicts_include_docs1({_, DbUrl}) ->
+    {DDocUrl, Rev} = create_ddocs(DbUrl, ?DOC1, custom),
+    Params = "?filter=filters/f&style=all_docs&conflicts=true&include_docs=true",
+    {200, #{<<"results">> := Res1}} = req(get, DbUrl ++ "/_changes" ++ Params),
+    ?assertMatch(
+        [
+            #{
+                <<"changes">> := [
+                    #{<<"rev">> := <<"2-c">>}, #{<<"rev">> := <<"2-b">>}, #{<<"rev">> := <<"2-d">>}
+                ],
+                <<"doc">> := #{
+                    <<"_id">> := ?DOC1, <<"_rev">> := <<"2-c">>, <<"_conflicts">> := [<<"2-b">>]
+                }
+            }
+        ],
+        Res1
+    ),
+    {200, #{<<"results">> := Res2}} = req(post, DbUrl ++ "/_changes" ++ Params),
+    ?assertEqual(Res1, Res2),
+    delete_ddocs(DDocUrl, Rev).
+
+t_js_filter_all_docs_conflicts_include_docs2({_, DbUrl}) ->
+    {DDocUrl, Rev} = create_ddocs(DbUrl, ?DOC3, custom),
+    Params = "?filter=filters/f&style=all_docs&conflicts=true&include_docs=true",
+    {200, #{<<"results">> := Res1}} = req(get, DbUrl ++ "/_changes" ++ Params),
+    ?assertMatch(
+        [
+            #{
+                <<"changes">> := [#{<<"rev">> := <<"2-b">>}],
+                <<"deleted">> := ?DELETED,
+                <<"doc">> := #{
+                    <<"_id">> := ?DOC3, <<"_rev">> := <<"2-b">>, <<"_deleted">> := ?DELETED
+                }
+            }
+        ],
+        Res1
+    ),
+    {200, #{<<"results">> := Res2}} = req(post, DbUrl ++ "/_changes" ++ Params),
+    ?assertEqual(Res1, Res2),
+    delete_ddocs(DDocUrl, Rev).
+
+t_view_include_docs({_, DbUrl}) ->
+    {DDocUrl, Rev} = create_ddocs(DbUrl, ?DOC1, view),
+    Params = "?filter=_view&view=views/v&include_docs=true",
+    {200, #{<<"results">> := Res1}} = req(get, DbUrl ++ "/_changes" ++ Params),
+    ?assertMatch(
+        [
+            #{
+                <<"changes">> := [#{<<"rev">> := <<"2-c">>}],
+                <<"doc">> := #{<<"_id">> := ?DOC1, <<"_rev">> := <<"2-c">>}
+            }
+        ],
+        Res1
+    ),
+    {200, #{<<"results">> := Res2}} = req(post, DbUrl ++ "/_changes" ++ Params),
+    ?assertEqual(Res1, Res2),
+    delete_ddocs(DDocUrl, Rev).
+
+t_view_conflicts_include_docs({_, DbUrl}) ->
+    {DDocUrl, Rev} = create_ddocs(DbUrl, ?DOC1, view),
+    Params = "?filter=_view&view=views/v&conflicts=true&include_docs=true",
+    {200, #{<<"results">> := Res1}} = req(get, DbUrl ++ "/_changes" ++ Params),
+    ?assertMatch(
+        [
+            #{
+                <<"changes">> := [#{<<"rev">> := <<"2-c">>}],
+                <<"doc">> := #{
+                    <<"_id">> := ?DOC1, <<"_rev">> := <<"2-c">>, <<"_conflicts">> := [<<"2-b">>]
+                }
+            }
+        ],
+        Res1
+    ),
+    {200, #{<<"results">> := Res2}} = req(post, DbUrl ++ "/_changes" ++ Params),
+    ?assertEqual(Res1, Res2),
+    delete_ddocs(DDocUrl, Rev).
+
+t_view_all_docs_conflicts_include_docs({_, DbUrl}) ->
+    {DDocUrl, Rev} = create_ddocs(DbUrl, ?DOC1, view),
+    Params = "?filter=_view&view=views/v&style=all_docs&conflicts=true&include_docs=true",
+    {200, #{<<"results">> := Res1}} = req(get, DbUrl ++ "/_changes" ++ Params),
+    ?assertMatch(
+        [
+            #{
+                <<"changes">> := [
+                    #{<<"rev">> := <<"2-c">>}, #{<<"rev">> := <<"2-b">>}, #{<<"rev">> := <<"2-d">>}
+                ],
+                <<"doc">> := #{
+                    <<"_id">> := ?DOC1, <<"_rev">> := <<"2-c">>, <<"_conflicts">> := [<<"2-b">>]
+                }
+            }
+        ],
+        Res1
+    ),
+    {200, #{<<"results">> := Res2}} = req(post, DbUrl ++ "/_changes" ++ Params),
+    ?assertEqual(Res1, Res2),
+    delete_ddocs(DDocUrl, Rev).
 
 % Utility functions
 
@@ -566,6 +927,24 @@ create_docs(DbUrl, DocRevs) ->
         end,
         lists:map(fun doc_fun/1, DocRevs)
     ).
+
+create_ddocs(DbUrl, DocId, Type) ->
+    case Type of
+        custom ->
+            DDocId = "_design/filters",
+            FilterFun = <<"function(doc, req) {return (doc._id == '", DocId/binary, "')}">>,
+            DDoc = #{<<"filters">> => #{<<"f">> => FilterFun}};
+        view ->
+            DDocId = "_design/views",
+            ViewFun = <<"function(doc) {if (doc._id == '", DocId/binary, "') {emit(1, 1);}}">>,
+            DDoc = #{<<"views">> => #{<<"v">> => #{<<"map">> => ViewFun}}}
+    end,
+    DDocUrl = DbUrl ++ "/" ++ DDocId,
+    {_, #{<<"rev">> := Rev, <<"ok">> := true}} = req(put, DDocUrl, DDoc),
+    {DDocUrl, Rev}.
+
+delete_ddocs(DDocUrl, Rev) ->
+    {200, #{}} = req(delete, DDocUrl ++ "?rev=" ++ binary_to_list(Rev)).
 
 changes(DbUrl) ->
     changes(DbUrl, "").

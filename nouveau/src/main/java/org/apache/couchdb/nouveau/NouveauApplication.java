@@ -13,12 +13,16 @@
 
 package org.apache.couchdb.nouveau;
 
+import com.github.benmanes.caffeine.cache.Scheduler;
 import io.dropwizard.core.Application;
 import io.dropwizard.core.setup.Environment;
 import io.swagger.v3.jaxrs2.integration.resources.OpenApiResource;
+import jakarta.servlet.DispatcherType;
+import java.util.EnumSet;
 import java.util.concurrent.ForkJoinPool;
+import java.util.concurrent.ScheduledExecutorService;
 import org.apache.couchdb.nouveau.core.IndexManager;
-import org.apache.couchdb.nouveau.core.UpdatesOutOfOrderExceptionMapper;
+import org.apache.couchdb.nouveau.core.UserAgentFilter;
 import org.apache.couchdb.nouveau.health.AnalyzeHealthCheck;
 import org.apache.couchdb.nouveau.health.IndexHealthCheck;
 import org.apache.couchdb.nouveau.lucene9.Lucene9Module;
@@ -26,7 +30,6 @@ import org.apache.couchdb.nouveau.lucene9.ParallelSearcherFactory;
 import org.apache.couchdb.nouveau.resources.AnalyzeResource;
 import org.apache.couchdb.nouveau.resources.IndexResource;
 import org.apache.couchdb.nouveau.tasks.CloseAllIndexesTask;
-import org.apache.lucene.search.SearcherFactory;
 
 public class NouveauApplication extends Application<NouveauApplicationConfiguration> {
 
@@ -41,7 +44,10 @@ public class NouveauApplication extends Application<NouveauApplicationConfigurat
 
     @Override
     public void run(NouveauApplicationConfiguration configuration, Environment environment) throws Exception {
-        environment.jersey().register(new UpdatesOutOfOrderExceptionMapper());
+        environment
+                .servlets()
+                .addFilter("UserAgentFilter", new UserAgentFilter())
+                .addMappingForUrlPatterns(EnumSet.of(DispatcherType.REQUEST), true, "/*");
 
         // configure index manager
         final IndexManager indexManager = new IndexManager();
@@ -49,11 +55,13 @@ public class NouveauApplication extends Application<NouveauApplicationConfigurat
         indexManager.setIdleSeconds(configuration.getIdleSeconds());
         indexManager.setMaxIndexesOpen(configuration.getMaxIndexesOpen());
         indexManager.setMetricRegistry(environment.metrics());
-        indexManager.setScheduler(environment
+        final ScheduledExecutorService schedulerExecutorService = environment
                 .lifecycle()
                 .scheduledExecutorService("index-manager-%d")
-                .threads(5)
-                .build());
+                .threads(configuration.getSchedulerThreadCount())
+                .build();
+        indexManager.setScheduler(Scheduler.forScheduledExecutorService(schedulerExecutorService));
+        indexManager.setSearcherFactory(new ParallelSearcherFactory(ForkJoinPool.commonPool()));
         indexManager.setObjectMapper(environment.getObjectMapper());
         indexManager.setRootDir(configuration.getRootDir());
         environment.lifecycle().manage(indexManager);
@@ -66,8 +74,7 @@ public class NouveauApplication extends Application<NouveauApplicationConfigurat
         environment.jersey().register(analyzeResource);
 
         // IndexResource
-        final SearcherFactory searcherFactory = new ParallelSearcherFactory(ForkJoinPool.commonPool());
-        final IndexResource indexResource = new IndexResource(indexManager, searcherFactory);
+        final IndexResource indexResource = new IndexResource(indexManager);
         environment.jersey().register(indexResource);
 
         // Health checks

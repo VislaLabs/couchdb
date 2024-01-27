@@ -16,7 +16,6 @@
 
 -module(dreyfus_index).
 -behaviour(gen_server).
--vsn(1).
 -include_lib("couch/include/couch_db.hrl").
 -include("dreyfus.hrl").
 
@@ -37,9 +36,7 @@
     init/1,
     handle_call/3,
     handle_cast/2,
-    handle_info/2,
-    terminate/2,
-    code_change/3
+    handle_info/2
 ]).
 
 % private definitions.
@@ -287,12 +284,6 @@ handle_info(
     ),
     [gen_server:reply(P, {error, Reason}) || {P, _} <- WaitList],
     {stop, normal, State}.
-
-terminate(_Reason, _State) ->
-    ok.
-
-code_change(_OldVsn, State, _Extra) ->
-    {ok, State}.
 
 % private functions.
 

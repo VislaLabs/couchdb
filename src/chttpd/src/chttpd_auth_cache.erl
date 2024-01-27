@@ -19,8 +19,7 @@
     handle_call/3,
     handle_cast/2,
     handle_info/2,
-    terminate/2,
-    code_change/3
+    terminate/2
 ]).
 -export([listen_for_changes/1, changes_callback/2]).
 
@@ -61,7 +60,7 @@ get_user_creds(_Req, UserName) when is_binary(UserName) ->
 
 update_user_creds(_Req, UserDoc, _Ctx) ->
     {_, Ref} = spawn_monitor(fun() ->
-        case fabric:update_doc(dbname(), UserDoc, []) of
+        case fabric:update_doc(dbname(), UserDoc, [?ADMIN_CTX]) of
             {ok, _} ->
                 exit(ok);
             Else ->
@@ -144,9 +143,6 @@ terminate(_Reason, #state{changes_pid = Pid}) when is_pid(Pid) ->
     exit(Pid, kill);
 terminate(_Reason, _State) ->
     ok.
-
-code_change(_OldVsn, #state{} = State, _Extra) ->
-    {ok, State}.
 
 %% private functions
 

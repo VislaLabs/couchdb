@@ -92,7 +92,7 @@ handle_info({'DOWN', IndexerRef, process, _Pid, Reason}, State) ->
             [{_, Index, Queue0}] = ets:lookup(?BY_DBSIG, DbSig),
             {{value, From}, Queue1} = queue:out(Queue0),
             case Reason of
-                normal ->
+                ok ->
                     gen_server:reply(From, ok);
                 {error, Msg} ->
                     couch_log:error(
@@ -152,10 +152,10 @@ configure_ibrowse(URL) ->
     ibrowse:set_max_sessions(
         Host,
         Port,
-        config:get_integer("nouveau", "max_sessions", 100)
+        nouveau_util:max_sessions()
     ),
     ibrowse:set_max_pipeline_size(
         Host,
         Port,
-        config:get_integer("nouveau", "max_pipeline_size", 1000)
+        nouveau_util:max_pipeline_size()
     ).

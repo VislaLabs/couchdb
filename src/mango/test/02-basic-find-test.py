@@ -26,6 +26,7 @@ class BasicFindTests(mango.UserDocsTests):
             {"foo": {"$not_an_op": 2}},
             {"$gt": 2},
             [None, "bing"],
+            {"_id": {"": None}},
         ]
         for bs in bad_selectors:
             try:
@@ -293,6 +294,23 @@ class BasicFindTests(mango.UserDocsTests):
         assert explain["mrargs"]["start_key"] == [0]
         assert explain["mrargs"]["end_key"] == ["<MAX>"]
         assert explain["mrargs"]["include_docs"] == True
+
+    def test_explain_options(self):
+        explain = self.db.find({"age": {"$gt": 0}}, fields=["manager"], explain=True)
+        opts = explain["opts"]
+        assert opts["r"] == 1
+        assert opts["limit"] == 25
+        assert opts["skip"] == 0
+        assert opts["fields"] == ["manager"]
+        assert opts["sort"] == {}
+        assert opts["bookmark"] == "nil"
+        assert opts["conflicts"] == False
+        assert opts["execution_stats"] == False
+        assert opts["partition"] == ""
+        assert opts["stable"] == False
+        assert opts["stale"] == False
+        assert opts["update"] == True
+        assert opts["use_index"] == []
 
     def test_sort_with_all_docs(self):
         explain = self.db.find(

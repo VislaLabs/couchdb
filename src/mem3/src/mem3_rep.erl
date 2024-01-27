@@ -41,7 +41,8 @@
     filter,
     db,
     hashfun,
-    incomplete_ranges
+    incomplete_ranges,
+    rexi_timeout
 }).
 
 -record(tgt, {
@@ -54,12 +55,16 @@
     remaining = 0
 }).
 
+-define(DEFAULT_REXI_TIMEOUT, 600000).
+
 go(Source, Target) ->
     go(Source, Target, []).
 
 go(DbName, Node, Opts) when is_binary(DbName), is_atom(Node) ->
     go(#shard{name = DbName, node = node()}, #shard{name = DbName, node = Node}, Opts);
-go(#shard{} = Source, #shard{} = Target, Opts) ->
+go(#shard{} = Source0, #shard{} = Target0, Opts) ->
+    Source = add_range(Source0),
+    Target = add_range(Target0),
     case mem3:db_is_current(Source) of
         true ->
             go(Source, targets_map(Source, Target), Opts);
@@ -88,6 +93,11 @@ go(#shard{} = Source, #{} = Targets0, Opts) when map_size(Targets0) > 0 ->
                 "incomplete_ranges",
                 false
             ),
+            RexiTimeout =
+                case proplists:get_value(rexi_timeout, Opts) of
+                    T when is_integer(T), T > 0 -> T;
+                    _ -> ?DEFAULT_REXI_TIMEOUT
+                end,
             Filter = proplists:get_value(filter, Opts),
             Acc = #acc{
                 batch_size = BatchSize,
@@ -95,7 +105,8 @@ go(#shard{} = Source, #{} = Targets0, Opts) when map_size(Targets0) > 0 ->
                 source = Source,
                 targets = Targets,
                 filter = Filter,
-                incomplete_ranges = IncompleteRanges
+                incomplete_ranges = IncompleteRanges,
+                rexi_timeout = RexiTimeout
             },
             go(Acc);
         false ->
@@ -366,7 +377,15 @@ pull_purges(Db, Count, #shard{} = SrcShard, #tgt{} = Tgt0, HashFun) ->
             % out using the same pickfun which we use when picking documents
             #shard{range = SrcRange} = SrcShard,
             BelongsFun = fun({_UUID, Id, _Revs}) when is_binary(Id) ->
-                mem3_reshard_job:pickfun(Id, [SrcRange], HashFun) =:= SrcRange
+                case SrcRange of
+                    [B, E] when is_integer(B), is_integer(E) ->
+                        mem3_reshard_job:pickfun(Id, [SrcRange], HashFun) =:= SrcRange;
+                    undefined ->
+                        % We may replicate node-local databases
+                        % which are not associated with a shard range. In that case
+                        % range will be undefined.
+                        true
+                end
             end,
             Infos1 = lists:filter(BelongsFun, Infos),
             {ok, _} = couch_db:purge_docs(Db, Infos1, [?REPLICATED_CHANGES]),
@@ -418,7 +437,14 @@ push_purges(Db, BatchSize, SrcShard, Tgt, HashFun) ->
                 erlang:max(0, Oldest - 1)
         end,
     BelongsFun = fun(Id) when is_binary(Id) ->
-        mem3_reshard_job:pickfun(Id, [TgtRange], HashFun) =:= TgtRange
+        case TgtRange of
+            [B, E] when is_integer(B), is_integer(E) ->
+                mem3_reshard_job:pickfun(Id, [TgtRange], HashFun) =:= TgtRange;
+            undefined ->
+                % We may replicate node-local databases which are not associated
+                % with a shard range. In that case range will be undefined.
+                true
+        end
     end,
     FoldFun = fun({PSeq, UUID, Id, Revs}, {Count, Infos, _}) ->
         case BelongsFun(Id) of
@@ -589,16 +615,16 @@ changes_append_fdi(
             )
     end.
 
-replicate_batch_multi(#acc{targets = Targets0, seq = Seq, db = Db} = Acc) ->
+replicate_batch_multi(#acc{targets = Targets0, seq = Seq, db = Db, rexi_timeout = Timeout} = Acc) ->
     Targets = maps:map(
         fun(_, #tgt{} = T) ->
-            replicate_batch(T, Db, Seq)
+            replicate_batch(T, Db, Seq, Timeout)
         end,
         Targets0
     ),
     {ok, Acc#acc{targets = Targets, revcount = 0}}.
 
-replicate_batch(#tgt{shard = TgtShard, infos = Infos} = Target, Db, Seq) ->
+replicate_batch(#tgt{shard = TgtShard, infos = Infos} = Target, Db, Seq, Timeout) ->
     #shard{node = Node, name = Name} = TgtShard,
     case find_missing_revs(Target) of
         [] ->
@@ -607,7 +633,7 @@ replicate_batch(#tgt{shard = TgtShard, infos = Infos} = Target, Db, Seq) ->
             lists:map(
                 fun(Chunk) ->
                     Docs = open_docs(Db, Infos, Chunk),
-                    ok = save_on_target(Node, Name, Docs)
+                    ok = save_on_target(Node, Name, Docs, Timeout)
                 end,
                 chunk_revs(Missing)
             )
@@ -677,13 +703,19 @@ open_docs(Db, Infos, Missing) ->
         Missing
     ).
 
-save_on_target(Node, Name, Docs) ->
-    mem3_rpc:update_docs(Node, Name, Docs, [
-        ?REPLICATED_CHANGES,
-        full_commit,
-        ?ADMIN_CTX,
-        {io_priority, {internal_repl, Name}}
-    ]),
+save_on_target(Node, Name, Docs, Timeout) ->
+    mem3_rpc:update_docs(
+        Node,
+        Name,
+        Docs,
+        [
+            ?REPLICATED_CHANGES,
+            full_commit,
+            ?ADMIN_CTX,
+            {io_priority, {internal_repl, Name}}
+        ],
+        Timeout
+    ),
     ok.
 
 purge_on_target(Node, Name, PurgeInfos) ->
@@ -875,9 +907,36 @@ reset_remaining(#{} = Targets) ->
         Targets
     ).
 
+add_range(#shard{name = DbName} = Shard) when is_binary(DbName) ->
+    case DbName of
+        <<"shards/", _Start:8/binary, "-", _End:8/binary, "/", _/binary>> ->
+            Shard#shard{range = mem3:range(DbName)};
+        <<_/binary>> ->
+            % We may replicate local dbs which do not have a shard range.
+            Shard
+    end.
+
 -ifdef(TEST).
 
 -include_lib("couch/include/couch_eunit.hrl").
+
+name_node_to_shard_local_db_test() ->
+    DbName = <<"foo">>,
+    Node = 'n1@bar.net',
+    Shard = add_range(#shard{name = DbName, node = Node}),
+    ?assertMatch(#shard{}, Shard),
+    ?assertEqual(DbName, Shard#shard.name),
+    ?assertEqual(Node, Shard#shard.node),
+    ?assertEqual(undefined, Shard#shard.range).
+
+name_node_to_shard_local_shard_test() ->
+    DbName = <<"shards/00000000-7fffffff/db.1687450595">>,
+    Node = 'n2@baz.org',
+    Shard = add_range(#shard{name = DbName, node = Node}),
+    ?assertMatch(#shard{}, Shard),
+    ?assertEqual(DbName, Shard#shard.name),
+    ?assertEqual(Node, Shard#shard.node),
+    ?assertEqual([0, 2147483647], Shard#shard.range).
 
 find_source_seq_int_test_() ->
     {

@@ -39,7 +39,7 @@
 ]).
 -export([get_all_security/2, open_shard/2]).
 -export([compact/1, compact/2]).
--export([get_purge_seq/2, purge_docs/3, set_purge_infos_limit/3]).
+-export([get_purge_seq/2, get_purged_infos/1, purge_docs/3, set_purge_infos_limit/3]).
 
 -export([
     get_db_info/2,
@@ -92,12 +92,21 @@ changes(DbName, Options, StartVector, DbOptions) ->
             StartSeq = calculate_start_seq(Db, node(), StartVector),
             Enum = fun changes_enumerator/2,
             Opts = [{dir, Dir}],
+            Pending0 =
+                case Dir of
+                    fwd ->
+                        couch_db:count_changes_since(Db, StartSeq);
+                    rev ->
+                        ChangesTotal = couch_db:count_changes_since(Db, 0),
+                        ChangesToEnd = couch_db:count_changes_since(Db, StartSeq),
+                        ChangesTotal - ChangesToEnd
+                end,
             Acc0 = #fabric_changes_acc{
                 db = Db,
                 seq = StartSeq,
                 args = Args,
                 options = Options,
-                pending = couch_db:count_changes_since(Db, StartSeq),
+                pending = Pending0,
                 epochs = couch_db:get_epochs(Db)
             },
             try
@@ -289,6 +298,10 @@ update_docs(DbName, Docs0, Options) ->
         end,
     Docs2 = make_att_readers(Docs1),
     with_db(DbName, Options, {couch_db, update_docs, [Docs2, Options, Type]}).
+
+get_purged_infos(DbName) ->
+    FoldFun = fun({_Seq, _UUID, Id, Revs}, Acc) -> {ok, [{Id, Revs} | Acc]} end,
+    with_db(DbName, [], {couch_db, fold_purge_infos, [0, FoldFun, []]}).
 
 get_purge_seq(DbName, Options) ->
     with_db(DbName, Options, {couch_db, get_purge_seq, []}).
@@ -493,7 +506,9 @@ view_cb(complete, Acc) ->
     ok = rexi:stream_last(complete),
     {ok, Acc};
 view_cb(ok, ddoc_updated) ->
-    rexi:reply({ok, ddoc_updated}).
+    rexi:reply({ok, ddoc_updated});
+view_cb(ok, insufficient_storage) ->
+    rexi:reply({ok, insufficient_storage}).
 
 reduce_cb({meta, Meta}, Acc) ->
     % Map function starting
@@ -511,7 +526,9 @@ reduce_cb(complete, Acc) ->
     ok = rexi:stream_last(complete),
     {ok, Acc};
 reduce_cb(ok, ddoc_updated) ->
-    rexi:reply({ok, ddoc_updated}).
+    rexi:reply({ok, ddoc_updated});
+reduce_cb(ok, insufficient_storage) ->
+    rexi:reply({ok, insufficient_storage}).
 
 changes_enumerator(#full_doc_info{} = FDI, Acc) ->
     changes_enumerator(couch_doc:to_doc_info(FDI), Acc);

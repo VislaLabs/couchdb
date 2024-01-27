@@ -39,6 +39,12 @@ handle_node_req(#httpd{path_parts = [_, <<"_local">>]} = Req) ->
     send_json(Req, 200, {[{name, node()}]});
 handle_node_req(#httpd{path_parts = [A, <<"_local">> | Rest]} = Req) ->
     handle_node_req(Req#httpd{path_parts = [A, node()] ++ Rest});
+% GET /_node/$node/_smoosh/status
+handle_node_req(#httpd{method = 'GET', path_parts = [_, _Node, <<"_smoosh">>, <<"status">>]} = Req) ->
+    {ok, Status} = smoosh:status(),
+    send_json(Req, 200, Status);
+handle_node_req(#httpd{path_parts = [_, _Node, <<"_smoosh">>, <<"status">>]} = Req) ->
+    send_method_not_allowed(Req, "GET");
 % GET /_node/$node/_versions
 handle_node_req(#httpd{method = 'GET', path_parts = [_, _Node, <<"_versions">>]} = Req) ->
     IcuVer = couch_ejson_compare:get_icu_version(),
@@ -112,16 +118,21 @@ handle_node_req(#httpd{path_parts = [_, _Node, <<"_config">>, _Section]} = Req) 
 % "value"
 handle_node_req(#httpd{method = 'PUT', path_parts = [_, Node, <<"_config">>, Section, Key]} = Req) ->
     couch_util:check_config_blacklist(Section),
-    Value = couch_util:trim(chttpd:json_body(Req)),
-    Persist = chttpd:header_value(Req, "X-Couch-Persist") /= "false",
-    OldValue = call_node(Node, config, get, [Section, Key, ""]),
-    IsSensitive = Section == <<"admins">>,
-    Opts = #{persist => Persist, sensitive => IsSensitive},
-    case call_node(Node, config, set, [Section, Key, ?b2l(Value), Opts]) of
-        ok ->
-            send_json(Req, 200, list_to_binary(OldValue));
-        {error, Reason} ->
-            chttpd:send_error(Req, {bad_request, Reason})
+    case chttpd:json_body(Req) of
+        JSONValue when is_binary(JSONValue) ->
+            Value = couch_util:trim(JSONValue),
+            Persist = chttpd:header_value(Req, "X-Couch-Persist") /= "false",
+            OldValue = call_node(Node, config, get, [Section, Key, ""]),
+            IsSensitive = Section == <<"admins">>,
+            Opts = #{persist => Persist, sensitive => IsSensitive},
+            case call_node(Node, config, set, [Section, Key, ?b2l(Value), Opts]) of
+                ok ->
+                    send_json(Req, 200, list_to_binary(OldValue));
+                {error, Reason} ->
+                    chttpd:send_error(Req, {bad_request, Reason})
+            end;
+        _ ->
+            chttpd:send_error(Req, {bad_request, <<"a JSON string expected">>})
     end;
 % GET /_node/$node/_config/Section/Key
 handle_node_req(#httpd{method = 'GET', path_parts = [_, Node, <<"_config">>, Section, Key]} = Req) ->
@@ -154,7 +165,6 @@ handle_node_req(#httpd{path_parts = [_, _Node, <<"_config">>, _Section, _Key | _
     chttpd:send_error(Req, not_found);
 % GET /_node/$node/_stats
 handle_node_req(#httpd{method = 'GET', path_parts = [_, Node, <<"_stats">> | Path]} = Req) ->
-    flush(Node, Req),
     Stats0 = call_node(Node, couch_stats, fetch, []),
     Stats = couch_stats_httpd:transform_stats(Stats0),
     Nested = couch_stats_httpd:nest(Stats),
@@ -164,8 +174,8 @@ handle_node_req(#httpd{method = 'GET', path_parts = [_, Node, <<"_stats">> | Pat
 handle_node_req(#httpd{path_parts = [_, _Node, <<"_stats">>]} = Req) ->
     send_method_not_allowed(Req, "GET");
 handle_node_req(#httpd{method = 'GET', path_parts = [_, Node, <<"_prometheus">>]} = Req) ->
-    Metrics = call_node(Node, couch_prometheus_server, scrape, []),
-    Version = call_node(Node, couch_prometheus_server, version, []),
+    Metrics = call_node(Node, couch_prometheus, scrape, []),
+    Version = call_node(Node, couch_prometheus, version, []),
     Type = "text/plain; version=" ++ Version,
     Header = [{<<"Content-Type">>, ?l2b(Type)}],
     chttpd:send_response(Req, 200, Header, Metrics);
@@ -254,14 +264,6 @@ call_node(Node, Mod, Fun, Args) when is_atom(Node) ->
             throw({error, {nodedown, Reason}});
         Else ->
             Else
-    end.
-
-flush(Node, Req) ->
-    case couch_util:get_value("flush", chttpd:qs(Req)) of
-        "true" ->
-            call_node(Node, couch_stats_aggregator, flush, []);
-        _Else ->
-            ok
     end.
 
 get_stats() ->

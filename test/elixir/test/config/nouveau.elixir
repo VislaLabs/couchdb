@@ -1,11 +1,13 @@
 %{
   "NouveauTest": [
+    "user-agent header is forbidden",
     "search analyze",
     "search info",
     "search returns all items for GET",
     "search returns all items for POST",
     "search returns all items (paginated)",
     "search for foo:bar",
+    "search for numeric ranges with locales",
     "sort by string field (asc)",
     "sort by string field (desc)",
     "sort by numeric field (asc)",
@@ -20,6 +22,9 @@
     "mango sort by string",
     "search GET (partitioned)",
     "search POST (partitioned)",
-    "mango (partitioned)"
+    "mango (partitioned)",
+    "delete",
+    "purge",
+    "purge with conflicts"
   ]
 }

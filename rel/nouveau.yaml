@@ -1,22 +1,22 @@
-maxIndexesOpen: 100
+maxIndexesOpen: 3000
 commitIntervalSeconds: 30
 idleSeconds: 60
-rootDir: target/indexes
+rootDir: {{nouveau_index_dir}}
 
 logging:
   level: INFO
 
 server:
   applicationConnectors:
-    - type: h2c
-      port: 8080
+    - type: http
       bindHost: 127.0.0.1
-      maxConcurrentStreams: 1024
-      initialStreamRecvWindow: 65535
+      port: {{nouveau_port}}
+      useDateHeader: false
   adminConnectors:
-    - type: h2c
-      port: 8081
+    - type: http
       bindHost: 127.0.0.1
+      port: {{nouveau_admin_port}}
+      useDateHeader: false
   gzip:
     includedMethods:
       - GET

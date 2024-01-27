@@ -22,12 +22,14 @@ basename=`basename $0`
 PACKAGE_AUTHOR_NAME="The Apache Software Foundation"
 
 REBAR3_BRANCH="3.21.0"
+ERLFMT_VERSION="v1.3.0"
 
 # TEST=0
 WITH_PROPER="true"
 WITH_FAUXTON=1
 WITH_DOCS=1
-WITH_NOUVEAU=0
+WITH_NOUVEAU="false"
+WITH_CLOUSEAU=0
 ERLANG_MD5="false"
 SKIP_DEPS=0
 
@@ -37,6 +39,10 @@ run_erlang() {
 
 COUCHDB_USER="$(whoami 2>/dev/null || echo couchdb)"
 SM_VSN=${SM_VSN:-"91"}
+CLOUSEAU_MTH=${CLOUSEAU_MTH:-"dist"}
+CLOUSEAU_URI=${CLOUSEAU_URI:-"https://github.com/cloudant-labs/clouseau/releases/download/%s/clouseau-%s-dist.zip"}
+CLOUSEAU_VSN=${CLOUSEAU_VSN:-"2.22.0"}
+CLOUSEAU_DIR="$(pwd)"/clouseau
 ARCH="$(uname -m)"
 ERLANG_VER="$(run_erlang 'io:put_chars(erlang:system_info(otp_release)).')"
 ERLANG_OS="$(run_erlang 'case os:type() of {OS, _} -> io:format("~s~n", [OS]) end.')"
@@ -58,9 +64,13 @@ Options:
   --disable-fauxton           do not build Fauxton
   --disable-docs              do not build any documentation or manpages
   --enable-nouveau            enable the new experimental search module
+  --enable-clouseau           enable the Clouseau search module
   --erlang-md5                use erlang for md5 hash operations
   --dev                       alias for --disable-docs --disable-fauxton
   --spidermonkey-version VSN  specify the version of SpiderMonkey to use (defaults to $SM_VSN)
+  --clouseau-method MTH       specify the method for Clouseau to deploy: git or dist (defaults to $CLOUSEAU_MTH)
+  --clouseau-uri URI          specify the location for retrieving Clouseau (defaults $(printf "$CLOUSEAU_URI" "$CLOUSEAU_VSN" "$CLOUSEAU_VSN"))
+  --clouseau-version VSN      specify the version (tag/branch for git) of Clouseau to use (defaults to $CLOUSEAU_VSN)
   --skip-deps                 do not update erlang dependencies
   --rebar=PATH                use rebar by specified path (version >=2.6.0 && <3.0 required)
   --rebar3=PATH               use rebar3 by specified path
@@ -95,10 +105,21 @@ parse_opts() {
                 ;;
 
             --enable-nouveau)
-                WITH_NOUVEAU=1
+                WITH_NOUVEAU="true"
                 shift
                 continue
                 ;;
+
+	    --enable-clouseau)
+		if [ "${ERLANG_VER}" -gt 25 ]; then
+		    echo "Warning: Clouseau is not working with OTP 26 or later at the moment, therefore it is not configured.  Continue in 5 seconds..."
+		    sleep 5
+		else
+		    WITH_CLOUSEAU=1
+		fi
+		shift
+		continue
+		;;
 
             --erlang-md5)
                 ERLANG_MD5="true"
@@ -116,7 +137,7 @@ parse_opts() {
             --dev-with-nouveau)
                 WITH_DOCS=0
                 WITH_FAUXTON=0
-                WITH_NOUVEAU=1
+                WITH_NOUVEAU="true"
                 shift
                 continue
                 ;;
@@ -201,6 +222,60 @@ parse_opts() {
                 exit 1
                 ;;
 
+	    --clouseau-version)
+		if [ -n "$2" ]; then
+		    eval CLOUSEAU_VSN=$2
+		    shift 2
+		    continue
+		else
+		    printf 'ERROR: "--clouseau-version" requires a non-empty argument.\n' >&2
+		    exit 1
+		fi
+		;;
+	    --clouseau-version=?*)
+		eval CLOUSEAU_VSN=${1#*=}
+		;;
+	    --clouseau-version=)
+	        printf 'ERROR: "--clouseau-version" requires a non-empty argument.\n' >&2
+	        exit 1
+	        ;;
+
+	    --clouseau-method)
+		if [ -n "$2" ]; then
+		    eval CLOUSEAU_MTH=$2
+		    shift 2
+		    continue
+		else
+		    printf 'ERROR: "--clouseau-method" requires a non-empty argument.\n' >&2
+		    exit 1
+		fi
+		;;
+	    --clouseau-method=?*)
+		eval CLOUSEAU_MTH=${1#*=}
+		;;
+	    --clouseau-method=)
+	        printf 'ERROR: "--clouseau-method" requires a non-empty argument.\n' >&2
+	        exit 1
+	        ;;
+
+	    --clouseau-uri)
+		if [ -n "$2" ]; then
+		    eval CLOUSEAU_URI=$2
+		    shift 2
+		    continue
+		else
+		    printf 'ERROR: "--clouseau-uri" requires a non-empty argument.\n' >&2
+		    exit 1
+		fi
+		;;
+	    --clouseau-uri=?*)
+		eval CLOUSEAU_URI=${1#*=}
+		;;
+	    --clouseau-uri=)
+	        printf 'ERROR: "--clouseau-uri" requires a non-empty argument.\n' >&2
+	        exit 1
+	        ;;
+
             --) # End of options
                 shift
                 break
@@ -241,6 +316,11 @@ if [ "${ERLANG_OS}" = "unix" ]; then
     fi
 fi
 
+# If we're in a release tarball and we don't have proper, then mark it as skipped
+if [ ! -d .git ] && [ "$WITH_PROPER" = "true" ] && [ ! -d src/proper ]; then
+    WITH_PROPER="false"
+fi
+
 echo "==> configuring couchdb in rel/couchdb.config"
 cat > rel/couchdb.config << EOF
 % Licensed under the Apache License, Version 2.0 (the "License"); you may not
@@ -261,6 +341,11 @@ cat > rel/couchdb.config << EOF
 {prefix, "."}.
 {data_dir, "./data"}.
 {view_index_dir, "./data"}.
+{nouveau_enable, "$WITH_NOUVEAU"}.
+{nouveau_index_dir, "./data/nouveau"}.
+{nouveau_url, "http://127.0.0.1:5987"}.
+{nouveau_port, 5987}.
+{nouveau_admin_port, 5988}.
 {state_dir, "./data"}.
 {log_file, "$LOG_FILE"}.
 {fauxton_root, "./share/www"}.
@@ -292,6 +377,7 @@ package_author_name = $PACKAGE_AUTHOR_NAME
 with_fauxton = $WITH_FAUXTON
 with_docs = $WITH_DOCS
 with_nouveau = $WITH_NOUVEAU
+with_clouseau = $WITH_CLOUSEAU
 
 user = $COUCHDB_USER
 spidermonkey_version = $SM_VSN
@@ -329,7 +415,7 @@ install_local_rebar3() {
 install_local_erlfmt() {
     if [ ! -x "${rootdir}/bin/erlfmt" ]; then
         if [ ! -d "${rootdir}/src/erlfmt" ]; then
-            git clone --depth 1 https://github.com/WhatsApp/erlfmt.git ${rootdir}/src/erlfmt
+            git clone --depth 1 --branch "${ERLFMT_VERSION}" https://github.com/WhatsApp/erlfmt.git ${rootdir}/src/erlfmt
         fi
         cd "${rootdir}"/src/erlfmt
         ${REBAR3} as release escriptize
@@ -337,6 +423,58 @@ install_local_erlfmt() {
         ${REBAR3} clean
         cd ../..
     fi
+}
+
+check_local_clouseau_dir() {
+    _dir="$1"
+
+    if [ -e "$_dir" ]; then
+	printf "ERROR: \"%s\" already exists.  Please remove or move it away first.\n" "$_dir" >&2
+	exit 1
+    fi
+}
+
+install_local_clouseau() {
+    case "$CLOUSEAU_MTH" in
+	dist)
+	    _DIST_URL=$(printf "$CLOUSEAU_URI" "$CLOUSEAU_VSN" "$CLOUSEAU_VSN")
+	    _MAVEN_BASE_URI=https://repo1.maven.org/maven2
+
+	    _SLF4J_SIMPLE_VSN=${SLF4J_SIMPLE_VERSION:-1.7.36}
+	    _SLF4J_SIMPLE_JAR=slf4j-simple-"$_SLF4J_SIMPLE_VSN".jar
+	    _SLF4J_SIMPLE_URL="$_MAVEN_BASE_URI"/org/slf4j/slf4j-simple/"$_SLF4J_SIMPLE_VSN"/"$_SLF4J_SIMPLE_JAR"
+
+	    check_local_clouseau_dir "$CLOUSEAU_DIR"
+	    mkdir -p "$CLOUSEAU_DIR"
+
+	    echo "Fetching Clouseau from $_DIST_URL..."
+	    if ! curl -sSL --max-redirs 1 -o clouseau.zip "$_DIST_URL"; then
+		printf "ERROR: %s could not be downloaded.\n" "$_DIST_URL" >&2
+		exit 1
+	    fi
+
+	    if ! unzip -q -j clouseau.zip -d "$CLOUSEAU_DIR"; then
+		printf "ERROR: Clouseau distribution package (clouseau.zip) could not be extracted.\n" >&2
+		exit 1
+	    fi
+
+	    rm clouseau.zip
+
+	    if ! curl -sSL --max-redirs 1 -o "$CLOUSEAU_DIR"/"$_SLF4J_SIMPLE_JAR" "$_SLF4J_SIMPLE_URL"; then
+		printf "ERROR: %s could not be downloaded.\n" "$_SLF4J_SIMPLE_URL" >&2
+		exit 1
+	    fi
+	    ;;
+
+	git)
+	    echo "Cloning Clouseau from $CLOUSEAU_URI ($CLOUSEAU_VSN)..."
+	    check_local_clouseau_dir "$CLOUSEAU_DIR"
+	    git clone --depth 1 --branch "$CLOUSEAU_VSN" "$CLOUSEAU_URI" "$CLOUSEAU_DIR"
+	    ;;
+
+	*) printf "ERROR: Invalid deployment method for Clouseau.  Please use either \`dist\` or \`git\` verbatim.\n" >&2
+	   exit 1
+    esac
 }
 
 if [ -z "${REBAR}" ]; then
@@ -352,6 +490,10 @@ fi
 if [ -z "${ERLFMT}" ]; then
     install_local_erlfmt
     ERLFMT=${rootdir}/bin/erlfmt
+fi
+
+if [ $WITH_CLOUSEAU -ne 0 ]; then
+    install_local_clouseau
 fi
 
 # only update dependencies, when we are not in a release tarball

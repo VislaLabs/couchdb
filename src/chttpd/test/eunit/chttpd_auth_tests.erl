@@ -41,11 +41,11 @@ setup_proxy_auth() ->
     {{StartCtx, ProxyCfgFile}, HashesShouldWork, HashesShouldFail, SupportedHashAlgorithms}.
 
 teardown_proxy_auth({{Ctx, ProxyCfgFile}, _, _, _}) ->
-    ok = file:delete(ProxyCfgFile),
     config:delete("chttpd_auth", "hash_algorithms", false),
     config:delete("chttpd_auth", "secret", false),
     config:delete("chttpd_auth", "proxy_use_secret", false),
     config:delete("chttpd", "require_valid_user", false),
+    ok = file:delete(ProxyCfgFile),
     test_util:stop_couch(Ctx).
 
 require_valid_user_exception_test_() ->
@@ -194,9 +194,10 @@ test_hash_algorithm([DefaultHashAlgorithm | DecodingHashAlgorithmsList] = _) ->
         {"X-Auth-CouchDB-Roles", "PROXY-USER-ROLE1, PROXY-USER-ROLE2"},
         {"X-Auth-CouchDB-Token", Token}
     ],
-    {ok, _, _, ReqBody} = test_request:get(base_url() ++ "/_session", Headers),
+    {ok, RespStatus, _, RespBody} = test_request:get(base_url() ++ "/_session", Headers),
+    ?assertMatch({200, _}, {RespStatus, RespBody}),
     IsAuthenticatedViaProxy = couch_util:get_nested_json_value(
-        jiffy:decode(ReqBody), [<<"info">>, <<"authenticated">>]
+        jiffy:decode(RespBody), [<<"info">>, <<"authenticated">>]
     ),
     ?assertEqual(IsAuthenticatedViaProxy, <<"proxy">>),
     test_hash_algorithm(DecodingHashAlgorithmsList).

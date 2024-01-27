@@ -17,7 +17,7 @@
 -export([start_link/2, run/2, cancel/1, is_running/1, get_compacting_pid/1]).
 
 %% gen_server callbacks
--export([init/1, terminate/2, code_change/3]).
+-export([init/1, terminate/2]).
 -export([handle_call/3, handle_cast/2, handle_info/2]).
 
 -include_lib("couch/include/couch_db.hrl").
@@ -89,9 +89,6 @@ handle_info({'EXIT', Pid, _Reason}, #st{idx = Pid} = State) ->
 handle_info(_Mesg, State) ->
     {stop, unknown_info, State}.
 
-code_change(_OldVsn, State, _Extra) ->
-    {ok, State}.
-
 compact(Parent, Mod, IdxState) ->
     DbName = Mod:get(db_name, IdxState),
     %% We use with_db here to make sure we hold db open
@@ -112,7 +109,7 @@ compact(Idx, Mod, IdxState, Opts) ->
         Mod:compact(Db, IdxState, Opts)
     end),
     ok = Mod:commit(NewIdxState),
-    case gen_server:call(Idx, {compacted, NewIdxState}) of
+    case gen_server:call(Idx, {compacted, NewIdxState}, infinity) of
         recompact ->
             couch_log:info("Compaction restarting for db: ~s idx: ~s", Args),
             compact(Idx, Mod, NewIdxState, [recompact]);

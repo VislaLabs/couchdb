@@ -13,13 +13,12 @@
 -include_lib("couch/include/couch_db.hrl").
 
 -behaviour(gen_server).
--vsn(3).
 -behaviour(config_listener).
 
 -export([start/0, stop/0]).
 -export([new/0, random/0]).
 
--export([init/1, terminate/2, code_change/3]).
+-export([init/1]).
 -export([handle_call/3, handle_cast/2, handle_info/2]).
 
 % config_listener api
@@ -42,9 +41,6 @@ random() ->
 init([]) ->
     ok = config:listen_for_changes(?MODULE, nil),
     {ok, state()}.
-
-terminate(_Reason, _State) ->
-    ok.
 
 handle_call(create, _From, random) ->
     {reply, random(), random};
@@ -76,9 +72,6 @@ handle_info(restart_config_listener, State) ->
     {noreply, State};
 handle_info(_Info, State) ->
     {noreply, State}.
-
-code_change(_OldVsn, State, _Extra) ->
-    {ok, State}.
 
 handle_config_change("uuids", _, _, _, _) ->
     {ok, gen_server:cast(?MODULE, change)};

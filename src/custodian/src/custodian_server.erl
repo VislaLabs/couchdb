@@ -12,7 +12,6 @@
 
 -module(custodian_server).
 -behaviour(gen_server).
--vsn(3).
 -behaviour(config_listener).
 
 % public api.
@@ -24,7 +23,6 @@
     handle_call/3,
     handle_cast/2,
     handle_info/2,
-    code_change/3,
     terminate/2
 ]).
 
@@ -43,8 +41,6 @@
     shard_checker,
     rescan = false
 }).
-
--define(VSN_0_2_7, 184129240591641721395874905059581858099).
 
 -ifdef(TEST).
 -define(RELISTEN_DELAY, 50).
@@ -113,12 +109,6 @@ terminate(_Reason, State) ->
     couch_event:stop_listener(State#state.event_listener),
     couch_util:shutdown_sync(State#state.shard_checker),
     ok.
-
-code_change(?VSN_0_2_7, State, _Extra) ->
-    ok = config:listen_for_changes(?MODULE, nil),
-    {ok, State};
-code_change(_OldVsn, #state{} = State, _Extra) ->
-    {ok, State}.
 
 % private functions
 

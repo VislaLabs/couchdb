@@ -44,7 +44,22 @@ valid() ->
 
 -spec check(list()) -> [{atom(), term()}].
 check(_Opts) ->
-    SearchNode = 'clouseau@127.0.0.1',
+    SearchNodeStr = config:get("dreyfus", "name"),
+    case SearchNodeStr of
+        undefined ->
+            [{info, clouseau_not_configured}];
+        _ ->
+            try list_to_existing_atom(SearchNodeStr) of
+                SearchNode ->
+                    ping_search_node(SearchNode)
+            catch
+                error:badarg ->
+                    [{warning, {clouseau_node, SearchNodeStr}}]
+            end
+    end.
+
+-spec ping_search_node(atom()) -> [{atom(), term()}].
+ping_search_node(SearchNode) ->
     case net_adm:ping(SearchNode) of
         pong ->
             [{info, {clouseau_ok, SearchNode}}];
@@ -54,7 +69,11 @@ check(_Opts) ->
     end.
 
 -spec format(term()) -> {io:format(), [term()]}.
+format(clouseau_not_configured) ->
+    {"Clouseau service is not configured", []};
 format({clouseau_ok, SearchNode}) ->
     {"Local search node at ~w responding ok", [SearchNode]};
+format({clouseau_node, SearchNode}) ->
+    {"Search node name ~s is not recognised", [SearchNode]};
 format({clouseau_error, SearchNode, Error}) ->
     {"Local search node at ~w not responding: ~w", [SearchNode, Error]}.

@@ -12,10 +12,9 @@
 
 -module(mem3_shards).
 -behaviour(gen_server).
--vsn(3).
 -behaviour(config_listener).
 
--export([init/1, terminate/2, code_change/3]).
+-export([init/1, terminate/2]).
 -export([handle_call/3, handle_cast/2, handle_info/2]).
 -export([handle_config_change/5, handle_config_terminate/3]).
 
@@ -53,7 +52,7 @@ opts_for_db(DbName0) ->
         {ok, #doc{body = {Props}}} ->
             mem3_util:get_shard_opts(Props);
         {not_found, _} ->
-            erlang:error(database_does_not_exist, ?b2l(DbName))
+            erlang:error(database_does_not_exist, [DbName])
     end.
 
 for_db(DbName) ->
@@ -302,9 +301,6 @@ terminate(_Reason, #st{changes_pid = Pid}) ->
     exit(Pid, kill),
     ok.
 
-code_change(_OldVsn, #st{} = St, _Extra) ->
-    {ok, St}.
-
 %% internal functions
 
 start_changes_listener(SinceSeq) ->
@@ -427,7 +423,7 @@ load_shards_from_db(ShardDb, DbName) ->
             end,
             Shards;
         {not_found, _} ->
-            erlang:error(database_does_not_exist, ?b2l(DbName))
+            erlang:error(database_does_not_exist, [DbName])
     end.
 
 load_shards_from_disk(DbName, DocId) ->

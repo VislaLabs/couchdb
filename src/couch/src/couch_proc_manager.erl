@@ -13,7 +13,6 @@
 -module(couch_proc_manager).
 -behaviour(gen_server).
 -behaviour(config_listener).
--vsn(3).
 
 -export([
     start_link/0,
@@ -34,8 +33,7 @@
     terminate/2,
     handle_call/3,
     handle_cast/2,
-    handle_info/2,
-    code_change/3
+    handle_info/2
 ]).
 
 -export([
@@ -278,9 +276,6 @@ handle_info(restart_config_listener, State) ->
     {noreply, State};
 handle_info(_Msg, State) ->
     {noreply, State}.
-
-code_change(_OldVsn, #state{} = State, _Extra) ->
-    {ok, State}.
 
 handle_config_terminate(_, stop, _) ->
     ok;

@@ -20,7 +20,7 @@ mkdir build
 cd build
 tar -xf ${WORKSPACE}/apache-couchdb-*.tar.gz
 cd apache-couchdb-*
-./configure --enable-nouveau
+./configure --enable-nouveau --enable-clouseau
 make check || (make build-report && false)
 '''
 
@@ -44,13 +44,13 @@ pipeline {
     // We need the jenkins user mapped inside of the image
     // npm config cache below deals with /home/jenkins not mapping correctly
     // inside the image
-    DOCKER_ARGS = '-e npm_config_cache=npm-cache -e HOME=. -v=/etc/passwd:/etc/passwd -v /etc/group:/etc/group'
+    DOCKER_ARGS = '-e npm_config_cache=/home/jenkins/.npm -e HOME=. -e MIX_HOME=/home/jenkins/.mix -e HEX_HOME=/home/jenkins/.hex -e PIP_CACHE_DIR=/home/jenkins/.cache/pip -v=/etc/passwd:/etc/passwd -v /etc/group:/etc/group -v /home/jenkins/.gradle:/home/jenkins/.gradle:rw,z -v /home/jenkins/.hex:/home/jenkins/.hex:rw,z -v /home/jenkins/.npm:/home/jenkins/.npm:rw,z -v /home/jenkins/.cache/pip:/home/jenkins/.cache/pip:rw,z -v /home/jenkins/.mix:/home/jenkins/.mix:rw,z'
 
     // *** BE SURE TO ALSO CHANGE THE ERLANG VERSIONS FARTHER DOWN ***
     // Search for ERLANG_VERSION
     // see https://issues.jenkins.io/browse/JENKINS-61047 for why this cannot
     // be done parametrically
-    LOW_ERLANG_VER = '24.3.4.10'
+    LOW_ERLANG_VER = '24.3.4.15'
   }
 
   options {
@@ -218,7 +218,7 @@ pipeline {
       steps {
         sh '''
           rm -rf apache-couchdb-*
-          ./configure --spidermonkey-version 78 --enable-nouveau
+          ./configure --spidermonkey-version 78 --enable-nouveau --enable-clouseau
           make dist
           chmod -R a+w * .
         '''
@@ -247,7 +247,7 @@ pipeline {
         axes {
           axis {
             name 'ERLANG_VERSION'
-            values '24.3.4.10', '25.3', '26.0'
+            values '24.3.4.15', '25.3.2.8', '26.2.1'
           }
           axis {
             name 'SM_VSN'

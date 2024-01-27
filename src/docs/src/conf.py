@@ -13,25 +13,30 @@
 import datetime
 import os
 import sys
+from pathlib import Path
 
 import sphinx_rtd_theme
 
 sys.path.insert(0, os.path.abspath("../ext"))
 
-needs_sphinx = "5.1.1"
-
 extensions = [
     "sphinx.ext.todo",
     "sphinx.ext.extlinks",
     "sphinxcontrib.httpdomain",
+    "sphinxcontrib.jquery",
+    "sphinx_copybutton",
     "configdomain",
 ]
 
 nitpicky = True
 
-# should be over-written using rebar-inherited settings
-version = "3.3"
-release = "3.3.0"
+# load version numbers from version.mk
+version_file = Path().absolute().joinpath("../../../version.mk").resolve()
+with open(version_file) as file:
+    props = dict(line.strip().split("=", 1) for line in file)
+
+version = f"{props['vsn_major']}.{props['vsn_minor']}"
+release = f"{props['vsn_major']}.{props['vsn_minor']}.{props['vsn_patch']}"
 
 project = "Apache CouchDB\u00ae"
 
@@ -65,7 +70,6 @@ html_use_index = False
 html_additional_pages = {"download": "pages/download.html", "index": "pages/index.html"}
 
 html_context = {
-    "ga_code": "UA-658988-6",
     # Enable the "Edit in GitHub link within the header of each page.
     "display_github": False,
     # Set the following variables to generate the resulting github URL for each page.
@@ -112,3 +116,4 @@ extlinks = {
 
 def setup(app):
     app.add_css_file("css/rtd_theme.css")
+    app.add_css_file("css/tablefix.css")

@@ -29,26 +29,15 @@ import jakarta.ws.rs.Produces;
 import jakarta.ws.rs.core.MediaType;
 import java.io.IOException;
 import java.util.List;
-import java.util.Map;
 import java.util.Objects;
 import org.apache.couchdb.nouveau.api.DocumentDeleteRequest;
 import org.apache.couchdb.nouveau.api.DocumentUpdateRequest;
 import org.apache.couchdb.nouveau.api.IndexDefinition;
 import org.apache.couchdb.nouveau.api.IndexInfo;
+import org.apache.couchdb.nouveau.api.IndexInfoRequest;
 import org.apache.couchdb.nouveau.api.SearchRequest;
 import org.apache.couchdb.nouveau.api.SearchResults;
-import org.apache.couchdb.nouveau.core.IndexLoader;
 import org.apache.couchdb.nouveau.core.IndexManager;
-import org.apache.couchdb.nouveau.lucene9.Lucene9AnalyzerFactory;
-import org.apache.couchdb.nouveau.lucene9.Lucene9Index;
-import org.apache.lucene.analysis.Analyzer;
-import org.apache.lucene.index.IndexWriter;
-import org.apache.lucene.index.IndexWriterConfig;
-import org.apache.lucene.misc.store.DirectIODirectory;
-import org.apache.lucene.search.SearcherFactory;
-import org.apache.lucene.search.SearcherManager;
-import org.apache.lucene.store.Directory;
-import org.apache.lucene.store.FSDirectory;
 
 @Path("/index/{name}")
 @Metered
@@ -59,11 +48,9 @@ import org.apache.lucene.store.FSDirectory;
 public final class IndexResource {
 
     private final IndexManager indexManager;
-    private final SearcherFactory searcherFactory;
 
-    public IndexResource(final IndexManager indexManager, final SearcherFactory searcherFactory) {
+    public IndexResource(final IndexManager indexManager) {
         this.indexManager = Objects.requireNonNull(indexManager);
-        this.searcherFactory = Objects.requireNonNull(searcherFactory);
     }
 
     @PUT
@@ -79,7 +66,7 @@ public final class IndexResource {
             @PathParam("docId") String docId,
             @NotNull @Valid DocumentDeleteRequest request)
             throws Exception {
-        indexManager.with(name, indexLoader(), (index) -> {
+        indexManager.with(name, (index) -> {
             index.delete(docId, request);
             return null;
         });
@@ -91,9 +78,28 @@ public final class IndexResource {
     }
 
     @GET
-    public IndexInfo indexInfo(@PathParam("name") String name) throws Exception {
-        return indexManager.with(name, indexLoader(), (index) -> {
+    public IndexInfo getIndexInfo(@PathParam("name") String name) throws Exception {
+        return indexManager.with(name, (index) -> {
             return index.info();
+        });
+    }
+
+    @POST
+    public void setIndexInfo(@PathParam("name") String name, @NotNull @Valid IndexInfoRequest request)
+            throws Exception {
+        indexManager.with(name, (index) -> {
+            if (request.getMatchUpdateSeq().isPresent()
+                    && request.getUpdateSeq().isPresent()) {
+                index.setUpdateSeq(
+                        request.getMatchUpdateSeq().getAsLong(),
+                        request.getUpdateSeq().getAsLong());
+            }
+            if (request.getMatchPurgeSeq().isPresent() && request.getPurgeSeq().isPresent()) {
+                index.setPurgeSeq(
+                        request.getMatchPurgeSeq().getAsLong(),
+                        request.getPurgeSeq().getAsLong());
+            }
+            return null;
         });
     }
 
@@ -101,7 +107,7 @@ public final class IndexResource {
     @Path("/search")
     public SearchResults searchIndex(@PathParam("name") String name, @NotNull @Valid SearchRequest request)
             throws Exception {
-        return indexManager.with(name, indexLoader(), (index) -> {
+        return indexManager.with(name, (index) -> {
             return index.search(request);
         });
     }
@@ -113,35 +119,9 @@ public final class IndexResource {
             @PathParam("docId") String docId,
             @NotNull @Valid DocumentUpdateRequest request)
             throws Exception {
-        indexManager.with(name, indexLoader(), (index) -> {
+        indexManager.with(name, (index) -> {
             index.update(docId, request);
             return null;
         });
-    }
-
-    private IndexLoader indexLoader() {
-        return (path, indexDefinition) -> {
-            final Analyzer analyzer = Lucene9AnalyzerFactory.fromDefinition(indexDefinition);
-            final Directory dir = new DirectIODirectory(FSDirectory.open(path.resolve("9")));
-            final IndexWriterConfig config = new IndexWriterConfig(analyzer);
-            config.setUseCompoundFile(false);
-            final IndexWriter writer = new IndexWriter(dir, config);
-            final long updateSeq = getUpdateSeq(writer);
-            final SearcherManager searcherManager = new SearcherManager(writer, searcherFactory);
-            return new Lucene9Index(analyzer, writer, updateSeq, searcherManager);
-        };
-    }
-
-    private static long getUpdateSeq(final IndexWriter writer) throws IOException {
-        final Iterable<Map.Entry<String, String>> commitData = writer.getLiveCommitData();
-        if (commitData == null) {
-            return 0L;
-        }
-        for (Map.Entry<String, String> entry : commitData) {
-            if (entry.getKey().equals("update_seq")) {
-                return Long.parseLong(entry.getValue());
-            }
-        }
-        return 0L;
     }
 }

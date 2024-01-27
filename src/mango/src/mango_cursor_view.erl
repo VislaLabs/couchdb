@@ -32,12 +32,10 @@
 
 -include("mango.hrl").
 -include("mango_cursor.hrl").
--include("mango_idx.hrl").
 -include("mango_idx_view.hrl").
 
 -define(HEARTBEAT_INTERVAL_IN_USEC, 4000000).
 
--type cursor_options() :: [{term(), term()}].
 -type message() ::
     {meta, _}
     | {row, row_properties()}
@@ -54,13 +52,13 @@
     #{
         selector => selector(),
         fields => fields(),
-        covering_index => maybe(#idx{})
+        covering_index => 'maybe'(#idx{})
     }.
 
 -spec viewcbargs_new(Selector, Fields, CoveringIndex) -> ViewCBArgs when
     Selector :: selector(),
     Fields :: fields(),
-    CoveringIndex :: maybe(#idx{}),
+    CoveringIndex :: 'maybe'(#idx{}),
     ViewCBArgs :: viewcbargs().
 viewcbargs_new(Selector, Fields, CoveringIndex) ->
     #{
@@ -69,7 +67,7 @@ viewcbargs_new(Selector, Fields, CoveringIndex) ->
         covering_index => CoveringIndex
     }.
 
--spec viewcbargs_get(Key, Args) -> maybe(term()) when
+-spec viewcbargs_get(Key, Args) -> 'maybe'(term()) when
     Key :: selector | fields | covering_index,
     Args :: viewcbargs().
 viewcbargs_get(selector, Args) when is_map(Args) ->
@@ -88,15 +86,16 @@ shard_stats_get(docs_examined, Args) when is_map(Args) ->
 shard_stats_get(keys_examined, Args) when is_map(Args) ->
     maps:get(keys_examined, Args, 0).
 
--spec create(Db, Indexes, Selector, Options) -> {ok, #cursor{}} when
+-spec create(Db, {Indexes, Trace}, Selector, Options) -> {ok, #cursor{}} when
     Db :: database(),
     Indexes :: [#idx{}],
+    Trace :: trace(),
     Selector :: selector(),
     Options :: cursor_options().
-create(Db, Indexes, Selector, Opts) ->
+create(Db, {Indexes, Trace0}, Selector, Opts) ->
     FieldRanges = mango_idx_view:field_ranges(Selector),
     Composited = composite_indexes(Indexes, FieldRanges),
-    {Index, IndexRanges} = choose_best_index(Composited),
+    {{Index, IndexRanges}, SortedIndexRanges} = choose_best_index(Composited),
 
     Limit = couch_util:get_value(limit, Opts, mango_opts:default_limit()),
     Skip = couch_util:get_value(skip, Opts, 0),
@@ -104,11 +103,13 @@ create(Db, Indexes, Selector, Opts) ->
     Bookmark = couch_util:get_value(bookmark, Opts),
 
     IndexRanges1 = mango_cursor:maybe_noop_range(Selector, IndexRanges),
+    Trace = maps:merge(Trace0, #{sorted_index_ranges => SortedIndexRanges}),
 
     {ok, #cursor{
         db = Db,
         index = Index,
         ranges = IndexRanges1,
+        trace = Trace,
         selector = Selector,
         opts = Opts,
         limit = Limit,
@@ -130,12 +131,12 @@ apply_cursor_opts(#cursor{} = Cursor) ->
     Args0 = apply_opts(Opts, BaseArgs),
     Fields = required_fields(Cursor),
     Args = consider_index_coverage(Index, Fields, Args0),
-    Covered = mango_idx_view:covers(Index, Fields),
-    {Args, Covered}.
+    Covering = mango_idx_view:covers(Index, Fields),
+    {Args, Covering}.
 
 -spec explain(#cursor{}) -> nonempty_list(term()).
 explain(Cursor) ->
-    {Args, Covered} = apply_cursor_opts(Cursor),
+    {Args, Covering} = apply_cursor_opts(Cursor),
     [
         {mrargs,
             {[
@@ -150,7 +151,7 @@ explain(Cursor) ->
                 {update, Args#mrargs.update},
                 {conflicts, Args#mrargs.conflicts}
             ]}},
-        {covered, Covered}
+        {covering, Covering}
     ].
 
 % replace internal values that cannot
@@ -238,7 +239,7 @@ execute(#cursor{db = Db, index = Idx, execution_stats = Stats} = Cursor0, UserFu
                         fabric:query_view(Db, DbOpts, DDoc, Name, CB, Cursor, Args)
                 end,
             case Result of
-                {ok, LastCursor} ->
+                {ok, #cursor{} = LastCursor} ->
                     NewBookmark = mango_json_bookmark:create(LastCursor),
                     Arg = {add_key, bookmark, NewBookmark},
                     {_Go, FinalUserAcc} = UserFun(Arg, LastCursor#cursor.user_acc),
@@ -252,13 +253,15 @@ execute(#cursor{db = Db, index = Idx, execution_stats = Stats} = Cursor0, UserFu
                         UserFun, Cursor, Stats1, FinalUserAcc0
                     ),
                     {ok, FinalUserAcc1};
+                {ok, Error} when is_tuple(Error) ->
+                    % fabric_view_all_docs turns {error, Resp} results into {ok, Resp}
+                    % for some reason. If we didn't get a proper cursor record, assume
+                    % it's an error and pass it through
+                    {error, Error};
                 {error, Reason} ->
                     {error, Reason}
             end
     end.
-
--type comparator() :: '$lt' | '$lte' | '$eq' | '$gte' | '$gt'.
--type range() :: {comparator(), any(), comparator(), any()} | empty.
 
 % Any of these indexes may be a composite index. For each
 % index find the most specific set of fields for each
@@ -302,7 +305,7 @@ composite_prefix([Col | Rest], Ranges) ->
 % In the future we can look into doing a cached parallel
 % reduce view read on each index with the ranges to find
 % the one that has the fewest number of rows or something.
--spec choose_best_index(IndexRanges) -> Selection when
+-spec choose_best_index(IndexRanges) -> {Selection, IndexRanges} when
     IndexRanges :: nonempty_list({#idx{}, [range()], integer()}),
     Selection :: {#idx{}, [range()]}.
 choose_best_index(IndexRanges) ->
@@ -329,8 +332,9 @@ choose_best_index(IndexRanges) ->
                 false
         end
     end,
-    {SelectedIndex, SelectedIndexRanges, _} = hd(lists:sort(Cmp, IndexRanges)),
-    {SelectedIndex, SelectedIndexRanges}.
+    SortedIndexRanges = lists:sort(Cmp, IndexRanges),
+    {SelectedIndex, SelectedIndexRanges, _} = hd(SortedIndexRanges),
+    {{SelectedIndex, SelectedIndexRanges}, SortedIndexRanges}.
 
 -spec view_cb
     (Message, #mrargs{}) -> Response when
@@ -422,7 +426,7 @@ view_cb(ok, ddoc_updated) ->
 -spec match_and_extract_doc(Doc, Selector, Fields) -> Result when
     Doc :: ejson(),
     Selector :: selector(),
-    Fields :: maybe(fields()),
+    Fields :: 'maybe'(fields()),
     Result :: {match, term()} | {no_match, undefined}.
 match_and_extract_doc(Doc, Selector, Fields) ->
     case mango_selector:match(Selector, Doc) of
@@ -905,6 +909,7 @@ composite_indexes_test() ->
 create_test() ->
     Index = #idx{type = <<"json">>, def = {[{<<"fields">>, {[]}}]}},
     Indexes = [Index],
+    Trace = #{},
     Ranges = [],
     Selector = {[]},
     Options = [{limit, limit}, {skip, skip}, {fields, fields}, {bookmark, bookmark}],
@@ -918,9 +923,10 @@ create_test() ->
             limit = limit,
             skip = skip,
             fields = fields,
-            bookmark = bookmark
+            bookmark = bookmark,
+            trace = #{sorted_index_ranges => [{Index, [], 0}]}
         },
-    ?assertEqual({ok, Cursor}, create(db, Indexes, Selector, Options)).
+    ?assertEqual({ok, Cursor}, create(db, {Indexes, Trace}, Selector, Options)).
 
 to_selector(Map) ->
     test_util:as_selector(Map).
@@ -977,7 +983,7 @@ explain_test() ->
                     {update, true},
                     {conflicts, undefined}
                 ]}},
-            {covered, false}
+            {covering, false}
         ],
     ?assertEqual(Response, explain(Cursor)).
 
@@ -986,18 +992,17 @@ execute_test_() ->
         foreach,
         fun() ->
             meck:new(foo, [non_strict]),
-            meck:new(fabric)
+            meck:new(fabric),
+            meck:new(chttpd_stats)
         end,
-        fun(_) ->
-            meck:unload(fabric),
-            meck:unload(foo)
-        end,
+        fun(_) -> meck:unload() end,
         [
             ?TDEF_FE(t_execute_empty),
             ?TDEF_FE(t_execute_ok_all_docs),
             ?TDEF_FE(t_execute_ok_all_docs_with_execution_stats),
             ?TDEF_FE(t_execute_ok_query_view),
-            ?TDEF_FE(t_execute_error)
+            ?TDEF_FE(t_execute_error_1),
+            ?TDEF_FE(t_execute_error_2)
         ]
     }.
 
@@ -1007,7 +1012,9 @@ t_execute_empty(_) ->
     meck:expect(fabric, query_view, ['_', '_', '_', '_', '_', '_'], meck:val(error)),
     ?assertEqual({ok, accumulator}, execute(Cursor, undefined, accumulator)),
     ?assertNot(meck:called(fabric, all_docs, '_')),
-    ?assertNot(meck:called(fabric, query_view, '_')).
+    ?assertNot(meck:called(fabric, query_view, '_')),
+    ?assertNot(meck:called(chttpd_stats, incr_rows, '_')),
+    ?assertNot(meck:called(chttpd_stats, incr_reads, '_')).
 
 t_execute_ok_all_docs(_) ->
     Bookmark = bookmark,
@@ -1032,12 +1039,19 @@ t_execute_ok_all_docs(_) ->
             user_fun = fun foo:bar/2,
             execution_stats = '_'
         },
+    TotalKeysExamined = 9,
+    TotalDocsExamined = 3,
     Cursor2 =
         Cursor1#cursor{
             bookmark = Bookmark,
             bookmark_docid = undefined,
             bookmark_key = undefined,
-            execution_stats = #execution_stats{executionStartTime = {0, 0, 0}}
+            execution_stats =
+                #execution_stats{
+                    totalKeysExamined = TotalKeysExamined,
+                    totalDocsExamined = TotalDocsExamined,
+                    executionStartTime = {0, 0, 0}
+                }
         },
     Extra =
         [
@@ -1064,13 +1078,25 @@ t_execute_ok_all_docs(_) ->
         db, [{user_ctx, user_ctx}], fun mango_cursor_view:handle_all_docs_message/2, Cursor1, Args
     ],
     meck:expect(fabric, all_docs, Parameters, meck:val({ok, Cursor2})),
+    meck:expect(chttpd_stats, incr_rows, [TotalKeysExamined], meck:val(ok)),
+    meck:expect(chttpd_stats, incr_reads, [TotalDocsExamined], meck:val(ok)),
     ?assertEqual({ok, updated_accumulator}, execute(Cursor, fun foo:bar/2, accumulator)),
     ?assert(meck:called(fabric, all_docs, '_')).
 
 t_execute_ok_query_view(_) ->
     Bookmark = bookmark,
-    UserFnParameters = [{add_key, bookmark, Bookmark}, accumulator],
-    meck:expect(foo, bar, UserFnParameters, meck:val({undefined, updated_accumulator})),
+    UserFnParameters1 = [{add_key, bookmark, Bookmark}, accumulator1],
+    IndexScanWarning =
+        <<"The number of documents examined is high in proportion to the number of results returned. Consider adding a more specific index to improve this.">>,
+    UserFnParameters2 = [{add_key, warning, IndexScanWarning}, accumulator2],
+    meck:expect(
+        foo,
+        bar,
+        [
+            {UserFnParameters1, meck:val({undefined, accumulator2})},
+            {UserFnParameters2, meck:val({undefined, accumulator3})}
+        ]
+    ),
     Index =
         #idx{
             type = <<"json">>,
@@ -1092,16 +1118,23 @@ t_execute_ok_query_view(_) ->
         },
     Cursor1 =
         Cursor#cursor{
-            user_acc = accumulator,
+            user_acc = accumulator1,
             user_fun = fun foo:bar/2,
             execution_stats = '_'
         },
+    TotalKeysExamined = 99,
+    TotalDocsExamined = 33,
     Cursor2 =
         Cursor1#cursor{
             bookmark = Bookmark,
             bookmark_docid = undefined,
             bookmark_key = undefined,
-            execution_stats = #execution_stats{executionStartTime = {0, 0, 0}}
+            execution_stats =
+                #execution_stats{
+                    totalKeysExamined = TotalKeysExamined,
+                    totalDocsExamined = TotalDocsExamined,
+                    executionStartTime = {0, 0, 0}
+                }
         },
     Extra =
         [
@@ -1134,17 +1167,31 @@ t_execute_ok_query_view(_) ->
         Args
     ],
     meck:expect(fabric, query_view, Parameters, meck:val({ok, Cursor2})),
-    ?assertEqual({ok, updated_accumulator}, execute(Cursor, fun foo:bar/2, accumulator)),
+    meck:expect(chttpd_stats, incr_rows, [TotalKeysExamined], meck:val(ok)),
+    meck:expect(chttpd_stats, incr_reads, [TotalDocsExamined], meck:val(ok)),
+    ?assertEqual({ok, accumulator3}, execute(Cursor, fun foo:bar/2, accumulator1)),
     ?assert(meck:called(fabric, query_view, '_')).
 
 t_execute_ok_all_docs_with_execution_stats(_) ->
     Bookmark = bookmark,
+    TotalKeysExamined = 33,
+    TotalDocsExamined = 12,
+    TotalQuorumDocsExamined = 0,
+    ResultsReturned = 20,
+    ExecutionStats =
+        #execution_stats{
+            totalKeysExamined = TotalKeysExamined,
+            totalDocsExamined = TotalDocsExamined,
+            totalQuorumDocsExamined = TotalQuorumDocsExamined,
+            resultsReturned = ResultsReturned,
+            executionStartTime = {0, 0, 0}
+        },
     Stats =
         {[
-            {total_keys_examined, 0},
-            {total_docs_examined, 0},
-            {total_quorum_docs_examined, 0},
-            {results_returned, 0},
+            {total_keys_examined, TotalKeysExamined},
+            {total_docs_examined, TotalDocsExamined},
+            {total_quorum_docs_examined, TotalQuorumDocsExamined},
+            {results_returned, ResultsReturned},
             {execution_time_ms, '_'}
         ]},
     UserFnDefinition =
@@ -1180,7 +1227,7 @@ t_execute_ok_all_docs_with_execution_stats(_) ->
             bookmark = Bookmark,
             bookmark_docid = undefined,
             bookmark_key = undefined,
-            execution_stats = #execution_stats{executionStartTime = {0, 0, 0}}
+            execution_stats = ExecutionStats
         },
     Extra =
         [
@@ -1206,11 +1253,13 @@ t_execute_ok_all_docs_with_execution_stats(_) ->
     Parameters = [
         db, [{user_ctx, user_ctx}], fun mango_cursor_view:handle_all_docs_message/2, Cursor1, Args
     ],
+    meck:expect(chttpd_stats, incr_rows, [TotalKeysExamined], meck:val(ok)),
+    meck:expect(chttpd_stats, incr_reads, [TotalDocsExamined], meck:val(ok)),
     meck:expect(fabric, all_docs, Parameters, meck:val({ok, Cursor2})),
     ?assertEqual({ok, updated_accumulator2}, execute(Cursor, fun foo:bar/2, accumulator)),
     ?assert(meck:called(fabric, all_docs, '_')).
 
-t_execute_error(_) ->
+t_execute_error_1(_) ->
     Cursor =
         #cursor{
             index = #idx{type = <<"json">>, ddoc = <<"_design/ghibli">>, name = index_name},
@@ -1225,7 +1274,28 @@ t_execute_error(_) ->
         db, '_', <<"ghibli">>, index_name, fun mango_cursor_view:handle_message/2, '_', '_'
     ],
     meck:expect(fabric, query_view, Parameters, meck:val({error, reason})),
-    ?assertEqual({error, reason}, execute(Cursor, undefined, accumulator)).
+    ?assertEqual({error, reason}, execute(Cursor, undefined, accumulator)),
+    ?assertNot(meck:called(chttpd_stats, incr_rows, '_')),
+    ?assertNot(meck:called(chttpd_stats, incr_reads, '_')).
+
+t_execute_error_2(_) ->
+    Cursor =
+        #cursor{
+            index = #idx{type = <<"json">>, ddoc = <<"_design/ghibli">>, name = index_name},
+            db = db,
+            selector = {[]},
+            fields = all_fields,
+            ranges = [{'$gte', start_key, '$lte', end_key}],
+            opts = [{user_ctx, user_ctx}],
+            bookmark = nil
+        },
+    Parameters = [
+        db, '_', <<"ghibli">>, index_name, fun mango_cursor_view:handle_message/2, '_', '_'
+    ],
+    meck:expect(fabric, query_view, Parameters, meck:val({ok, {error, reason}})),
+    ?assertEqual({error, {error, reason}}, execute(Cursor, undefined, accumulator)),
+    ?assertNot(meck:called(chttpd_stats, incr_rows, '_')),
+    ?assertNot(meck:called(chttpd_stats, incr_reads, '_')).
 
 view_cb_test_() ->
     {
@@ -1733,7 +1803,9 @@ match_and_extract_doc_nomatch_fields_test() ->
 %% Query planner tests:
 %% - there should be no comparison for a singleton list, with a trivial result
 choose_best_index_with_singleton_test() ->
-    ?assertEqual({index, ranges}, choose_best_index([{index, ranges, undefined}])).
+    IndexRanges = [{index, ranges, undefined}],
+    Result = {{index, ranges}, IndexRanges},
+    ?assertEqual(Result, choose_best_index([{index, ranges, undefined}])).
 
 %% - choose the index with the lowest difference between its prefix and field ranges
 choose_best_index_lowest_difference_test() ->
@@ -1743,14 +1815,28 @@ choose_best_index_lowest_difference_test() ->
             {index2, ranges2, 2},
             {index3, ranges3, 1}
         ],
-    ?assertEqual({index3, ranges3}, choose_best_index(IndexRanges1)),
+    SortedIndexRanges1 =
+        [
+            {index3, ranges3, 1},
+            {index2, ranges2, 2},
+            {index1, ranges1, 3}
+        ],
+    Result1 = {{index3, ranges3}, SortedIndexRanges1},
+    ?assertEqual(Result1, choose_best_index(IndexRanges1)),
     IndexRanges2 =
         [
             {index1, ranges1, 3},
             {index2, ranges2, 1},
             {index3, ranges3, 2}
         ],
-    ?assertEqual({index2, ranges2}, choose_best_index(IndexRanges2)).
+    SortedIndexRanges2 =
+        [
+            {index2, ranges2, 1},
+            {index3, ranges3, 2},
+            {index1, ranges1, 3}
+        ],
+    Result2 = {{index2, ranges2}, SortedIndexRanges2},
+    ?assertEqual(Result2, choose_best_index(IndexRanges2)).
 
 %% - if that is equal, choose the index with the least number of fields in the index
 choose_best_index_least_number_of_fields_test() ->
@@ -1762,7 +1848,14 @@ choose_best_index_least_number_of_fields_test() ->
             {Index2, ranges2, 1},
             {Index3, ranges3, 1}
         ],
-    ?assertEqual({Index2, ranges2}, choose_best_index(IndexRanges)).
+    SortedIndexRanges =
+        [
+            {Index2, ranges2, 1},
+            {Index1, ranges1, 1},
+            {Index3, ranges3, 1}
+        ],
+    Result = {{Index2, ranges2}, SortedIndexRanges},
+    ?assertEqual(Result, choose_best_index(IndexRanges)).
 
 %% - otherwise, choose alphabetically based on the index properties:
 choose_best_index_lowest_index_triple_test() ->
@@ -1778,7 +1871,14 @@ choose_best_index_lowest_index_triple_test() ->
             {Index2, ranges2, 1},
             {Index3, ranges3, 1}
         ],
-    ?assertEqual({Index1, ranges1}, choose_best_index(IndexRanges1)),
+    SortedIndexRanges1 =
+        [
+            {Index1, ranges1, 1},
+            {Index2, ranges2, 1},
+            {Index3, ranges3, 1}
+        ],
+    Result1 = {{Index1, ranges1}, SortedIndexRanges1},
+    ?assertEqual(Result1, choose_best_index(IndexRanges1)),
 
     % - if that is equal, design document name
     Index4 = WithSomeColumns(json_index(<<"db_a">>, <<"_design/c">>, <<"B">>)),
@@ -1790,7 +1890,14 @@ choose_best_index_lowest_index_triple_test() ->
             {Index5, ranges5, 1},
             {Index6, ranges6, 1}
         ],
-    ?assertEqual({Index6, ranges6}, choose_best_index(IndexRanges2)),
+    SortedIndexRanges2 =
+        [
+            {Index6, ranges6, 1},
+            {Index5, ranges5, 1},
+            {Index4, ranges4, 1}
+        ],
+    Result2 = {{Index6, ranges6}, SortedIndexRanges2},
+    ?assertEqual(Result2, choose_best_index(IndexRanges2)),
 
     % - otherwise, index name
     Index7 = WithSomeColumns(json_index(<<"db_a">>, <<"_design/a">>, <<"B">>)),
@@ -1802,7 +1909,14 @@ choose_best_index_lowest_index_triple_test() ->
             {Index8, ranges8, 1},
             {Index9, ranges9, 1}
         ],
-    ?assertEqual({Index9, ranges9}, choose_best_index(IndexRanges3)).
+    SortedIndexRanges3 =
+        [
+            {Index9, ranges9, 1},
+            {Index7, ranges7, 1},
+            {Index8, ranges8, 1}
+        ],
+    Result3 = {{Index9, ranges9}, SortedIndexRanges3},
+    ?assertEqual(Result3, choose_best_index(IndexRanges3)).
 
 json_index(DbName, DesignDoc, Name) ->
     #idx{

@@ -13,8 +13,6 @@
 -module(mango_native_proc).
 -behavior(gen_server).
 
--include("mango_idx.hrl").
-
 -export([
     start_link/0,
     set_timeout/2,
@@ -26,8 +24,7 @@
     terminate/2,
     handle_call/3,
     handle_cast/2,
-    handle_info/2,
-    code_change/3
+    handle_info/2
 ]).
 
 -record(st, {
@@ -110,9 +107,6 @@ handle_cast(Msg, St) ->
 
 handle_info(Msg, St) ->
     {stop, {invalid_info, Msg}, St}.
-
-code_change(_OldVsn, St, _Extra) ->
-    {ok, St}.
 
 map_doc(#st{indexes = Indexes}, Doc) ->
     lists:map(fun(Idx) -> get_index_entries(Idx, Doc) end, Indexes).

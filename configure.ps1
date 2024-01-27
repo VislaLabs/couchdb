@@ -7,9 +7,14 @@
 
   -DisableFauxton            request build process skip building Fauxton (default false)
   -DisableDocs               request build process skip building documentation (default false)
+  -EnableNouveau             enable the new experiemtal search module (default false)
+  -EnableClouseau            enable the Clouseau search module (default false)
   -SkipDeps                  do not update Erlang dependencies (default false)
   -CouchDBUser USER          set the username to run as (defaults to current user)
   -SpiderMonkeyVersion VSN   select the version of SpiderMonkey to use (default 91)
+  -ClouseauVersion VSN       select the version of Clouseau to use (default 2.22.0)
+  -ClouseauMethod MTH        method for Clouseau to deploy: git or dist (default dist)
+  -ClouseauUri URI           location for retrieving Clouseau (default https://github.com/cloudant-labs/clouseau/releases/download/2.22.0/clouseau-2.22.0-dist.zip)
 
   Installation directories:
   -Prefix PREFIX             install architecture-independent files in PREFIX
@@ -43,6 +48,8 @@ Param(
     [switch]$Test = $false,
     [switch]$DisableFauxton = $false, # do not build Fauxton
     [switch]$DisableDocs = $false, # do not build any documentation or manpages
+    [switch]$EnableNouveau = $false, # dont use new search module by default
+    [switch]$EnableClouseau = $false, # do not use Clouseau by default
     [switch]$SkipDeps = $false, # do not update erlang dependencies
     [switch]$DisableProper = $false, # a compilation pragma. proper is a kind of automated test suite
     [switch]$EnableErlangMD5 = $false, # don't use Erlang for md5 hash operations by default
@@ -51,6 +58,12 @@ Param(
     [string]$CouchDBUser = [Environment]::UserName, # set the username to run as (defaults to current user)
     [ValidateNotNullOrEmpty()]
     [string]$SpiderMonkeyVersion = "91", # select the version of SpiderMonkey to use (default 91)
+    [ValidateNotNullOrEmpty()]
+    [string]$ClouseauMethod = "dist", # method for Clouseau to deploy: git or dist (default dist)
+    [ValidateNotNullOrEmpty()]
+    [string]$ClouseauVersion = "2.22.0", # select the version of Clouseau to use (default 2.22.0)
+    [ValidateNotNullOrEmpty()]
+    [string]$ClouseauUri = "https://github.com/cloudant-labs/clouseau/releases/download/{0}/clouseau-{0}-dist.zip", # location for retrieving Clouseau (default https://github.com/cloudant-labs/clouseau/releases/download/2.22.0/clouseau-2.22.0-dist.zip)
     [ValidateNotNullOrEmpty()]
     [string]$Prefix = "C:\Program Files\Apache\CouchDB", # install architecture-independent file location (default C:\Program Files\Apache\CouchDB)
     [ValidateNotNullOrEmpty()]
@@ -127,6 +140,8 @@ $InstallDir="$LibDir\couchdb"
 $LogFile="$LogDir\couch.log"
 $BuildFauxton = [int](-not $DisableFauxton)
 $BuildDocs = [int](-not $DisableDocs)
+$WithNouveau = ($EnableNouveau).ToString().ToLower()
+$WithClouseau = $(If ($EnableClouseau) {1} else {0})
 $Hostname = [System.Net.Dns]::GetHostEntry([string]"localhost").HostName
 $WithProper = (-not $DisableProper).ToString().ToLower()
 $ErlangMD5 = ($EnableErlangMD5).ToString().ToLower()
@@ -151,11 +166,17 @@ $CouchDBConfig = @"
 {prefix, "."}.
 {data_dir, "./data"}.
 {view_index_dir, "./data"}.
+{nouveau_enable, "$WithNouveau"}.
+{nouveau_index_dir, "./data/nouveau"}.
+{nouveau_url, "http://127.0.0.1:5987"}.
+{nouveau_port, 5987}.
+{nouveau_admin_port, 5988}.
+{state_dir, "./data"}.
 {log_file, ""}.
 {fauxton_root, "./share/www"}.
 {user, "$CouchDBUser"}.
 {spidermonkey_version, "$SpiderMonkeyVersion"}.
-{node_name, "-name couchdb@localhost"}.
+{node_name, "-name couchdb@127.0.0.1"}.
 {cluster_port, 5984}.
 {backend_port, 5986}.
 {prometheus_port, 17986}.
@@ -196,6 +217,8 @@ man_dir = $ManDir
 
 with_fauxton = $BuildFauxton
 with_docs = $BuildDocs
+with_nouveau = $WithNouveau
+with_clouseau = $WithClouseau
 
 user = $CouchDBUser
 spidermonkey_version = $SpiderMonkeyVersion
@@ -260,6 +283,59 @@ if ((Get-Command "erlfmt.cmd" -ErrorAction SilentlyContinue) -eq $null)
    cp $rootdir\src\erlfmt\_build\release\bin\erlfmt.cmd $rootdir\bin\erlfmt.cmd
    make -C $rootdir\src\erlfmt clean
    cd ..\..
+}
+
+$ClouseauDir = "$rootdir\clouseau"
+
+if ($EnableClouseau)
+{
+
+    if (Test-Path $ClouseauDir) {
+	Write-Output "ERROR: ""$ClouseauDir"" already exists.  Please remove or move it away first."
+	exit 1
+    }
+
+    if ($ClouseauMethod -eq "dist") {
+	Write-Verbose "===> fetching Clouseau from $ClouseauDistUrl..."
+
+	New-Item -Path $ClouseauDir -ItemType Directory | Out-File Null
+
+	$Slf4jVersion = "1.7.36"
+	$ClouseauDistUrl = $ClouseauUri -f $ClouseauVersion
+	$Slf4jSimpleJar = "slf4j-simple-$Slf4jVersion.jar"
+	$Slf4jSimpleUrl = "https://repo1.maven.org/maven2/org/slf4j/slf4j-simple/$Slf4jVersion/$Slf4jSimpleJar"
+
+	Set-Variable ProgressPreference SilentlyContinue
+	Invoke-WebRequest -MaximumRedirection 1 -OutFile clouseau.zip $ClouseauDistUrl
+	If ($LASTEXITCODE -ne 0) {
+	    Write-Output "ERROR: $ClouseauDistUrl could not be downloaded."
+	    exit 1
+	}
+
+	Expand-Archive clouseau.zip -DestinationPath $ClouseauDir -Force
+	If ($LASTEXITCODE -ne 0) {
+	    Write-Output "ERROR: Clouseau distribution package (clouseau.zip) could not be extracted."
+	    exit 1
+	}
+	mv "$ClouseauDir\*\*.jar" "$ClouseauDir"
+	rm "$ClouseauDir\clouseau-$ClouseauVersion"
+	rm clouseau.zip
+
+	Invoke-WebRequest -MaximumRedirection 1 -OutFile "$ClouseauDir\$Slf4jSimpleJar" $Slf4jSimpleUrl
+	If ($LASTEXITCODE -ne 0) {
+	    Write-Output "ERROR: $Slf4jSimpleJarUrl could not be downloaded."
+	    exit 1
+	}
+    }
+    elseif ($ClouseauMethod -eq "git") {
+	Write-Verbose "===> cloning Clouseau from $ClouseauDistUrl ($ClouseauVersion)..."
+
+	git clone --depth 1 --branch $ClouseauVersion $ClouseauUri $ClouseauDir
+    }
+    else {
+	Write-Output "ERROR: Invalid deployment method for Clouseau.  Please use either `dist` or `git`."
+	exit 1
+    }
 }
 
 # only update dependencies, when we are not in a release tarball

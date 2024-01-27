@@ -1,7 +1,7 @@
 defmodule NouveauTest do
   use CouchTestCase
 
-  @moduletag :search
+  @moduletag :nouveau
 
   @moduledoc """
   Test search
@@ -18,6 +18,48 @@ defmodule NouveauTest do
       ]}
     )
     assert resp.status_code in [201]
+    resp
+  end
+
+  def create_conflicted_search_docs(db_name) do
+    resp = Couch.post("/#{db_name}/_bulk_docs",
+      headers: ["Content-Type": "application/json"],
+      body: %{:docs => [
+                # doc4: conflict between 1-a and 1-b, 1-b wins, 1-b will be purged
+                %{"_id" => "doc4", "foo" => "foo", "bar" => 42, "baz" => "hello there",
+                  "_revisions" => %{:start => 1, :ids => ["a"]}
+                },
+                %{"_id" => "doc4", "foo" => "fooX", "bar" => 43, "baz" => "hello thereX",
+                  "_revisions" => %{:start => 1, :ids => ["b"]}
+                },
+
+                # doc3: conflict between 1-a deleted and 2-c, 1-a is deleted,
+                %{"_id" => "doc3", "foo" => "bar", "bar" => 12.0, "baz" => "hello",
+                  "_revisions" => %{:start => 1, :ids => ["a"]},
+                  "_deleted" => true
+                },
+                %{"_id" => "doc3", "foo" => "barX", "bar" => 13.0, "baz" => "helloX",
+                  "_revisions" => %{:start => 2, :ids => ["c", "b"]}
+                },
+
+                # doc1: conflict between 1-a and 2-c, 2-c is deleted
+                %{"_id" => "doc1", "foo" => "baz", "bar" => 0, "baz" => "there",
+                  "_revisions" => %{:start => 1, :ids => ["a"]}
+                },
+                %{"_id" => "doc1", "foo" => "bazX", "bar" => 1, "baz" => "thereX",
+                  "_revisions" => %{:start => 2, :ids => ["c", "b"]},
+                  "_deleted" => true
+                },
+
+                # doc2: 2-b is deleted
+                %{"_id" => "doc2", "foo" => "foobar", "bar" => 100, "baz" => "hi",
+                  "_revisions" => %{:start => 2, :ids => ["b", "a"]},
+                  "_deleted" => true
+                }
+      ], :new_edits => false}
+    )
+    assert resp.status_code in [201]
+    resp
   end
 
   def create_partitioned_search_docs(db_name) do
@@ -87,9 +129,20 @@ defmodule NouveauTest do
     bookmark
   end
 
+  def get_total_hits(resp) do
+    %{:body => %{"total_hits" => total_hits}} = resp
+    total_hits
+  end
+
   def assert_status_code(resp, code) do
     assert resp.status_code == code,
       "status code: #{resp.status_code}, resp body: #{:jiffy.encode(resp.body)}"
+  end
+
+  test "user-agent header is forbidden", context do
+    resp = Couch.get("http://127.0.0.1:5987",
+      headers: ["User-Agent": "couchdb"])
+    assert_status_code(resp, 403)
   end
 
   test "search analyze", context do
@@ -180,6 +233,25 @@ defmodule NouveauTest do
     assert_status_code(resp, 200)
     ids = get_ids(resp)
     assert ids == ["doc3"]
+  end
+
+  @tag :with_db
+  test "search for numeric ranges with locales", context do
+    db_name = context[:db_name]
+    create_search_docs(db_name)
+    create_ddoc(db_name)
+
+    url = "/#{db_name}/_design/foo/_nouveau/bar"
+    resp = Couch.post(url, body: %{q: "bar:[10.0 TO 20.0]", locale: "us", include_docs: true})
+    assert_status_code(resp, 200)
+    ids = get_ids(resp)
+    assert ids == ["doc3"]
+
+    url = "/#{db_name}/_design/foo/_nouveau/bar"
+    resp = Couch.post(url, body: %{q: "bar:[10.0 TO 20.0]", locale: "de", include_docs: true})
+    assert_status_code(resp, 200)
+    ids = get_ids(resp)
+    assert ids == ["doc2"]
   end
 
   @tag :with_db
@@ -399,6 +471,142 @@ defmodule NouveauTest do
     assert_status_code(resp, 200)
     ids = get_mango_ids(resp)
     assert ids == ["bar:doc3"]
+  end
+
+  @tag :with_db
+  test "delete", context do
+    db_name = context[:db_name]
+    create_resp = create_search_docs(db_name)
+    create_ddoc(db_name)
+
+    search_url = "/#{db_name}/_design/foo/_nouveau/bar"
+
+    # confirm all hits
+    resp = Couch.get(search_url, query: %{q: "*:*", include_docs: true})
+    assert_status_code(resp, 200)
+    assert get_total_hits(resp) == 4
+
+    # delete a doc
+    doc = hd(create_resp.body)
+    resp = Couch.delete("/#{db_name}/#{doc["id"]}?rev=#{doc["rev"]}")
+    assert_status_code(resp, 200)
+
+    # confirm it is gone
+    resp = Couch.get(search_url, query: %{q: "*:*", include_docs: true})
+    assert_status_code(resp, 200)
+    assert get_total_hits(resp) == 3
+
+    resp = Couch.get("/#{db_name}/_design/foo/_nouveau_info/bar")
+    assert_status_code(resp, 200)
+    assert resp.body["search_index"]["update_seq"] == 6
+    assert resp.body["search_index"]["purge_seq"] == 0
+  end
+
+  @tag :with_db
+  test "purge", context do
+    db_name = context[:db_name]
+    create_resp = create_search_docs(db_name)
+    create_ddoc(db_name)
+
+    search_url = "/#{db_name}/_design/foo/_nouveau/bar"
+
+    # confirm all hits
+    resp = Couch.get(search_url, query: %{q: "*:*", include_docs: true})
+    assert_status_code(resp, 200)
+    assert get_total_hits(resp) == 4
+
+    # purge a doc
+    doc = hd(create_resp.body)
+    resp =
+      Couch.post("/#{db_name}/_purge",
+        body: %{doc["id"] => [doc["rev"]]}
+      )
+    assert_status_code(resp, 201)
+
+    # confirm it is gone
+    resp = Couch.get(search_url, query: %{q: "*:*", include_docs: true})
+    assert_status_code(resp, 200)
+    assert get_total_hits(resp) == 3
+
+    resp = Couch.get("/#{db_name}/_design/foo/_nouveau_info/bar")
+    assert_status_code(resp, 200)
+    db_info = info(db_name)
+    assert seq(db_info["update_seq"]) == resp.body["search_index"]["update_seq"]
+    assert seq(db_info["purge_seq"]) == resp.body["search_index"]["purge_seq"]
+  end
+
+  @tag :with_db
+  test "purge with conflicts", context do
+    db_name = context[:db_name]
+    create_resp = create_conflicted_search_docs(db_name)
+    create_ddoc(db_name)
+
+    search_url = "/#{db_name}/_design/foo/_nouveau/bar"
+
+    # confirm all hits
+    resp = Couch.get(search_url, query: %{q: "*:*", include_docs: true})
+    assert_status_code(resp, 200)
+
+    assert get_total_hits(resp) == 3
+    [hit1, hit2, hit3] = Enum.sort(resp.body["hits"])
+
+    assert hit1["doc"]["_id"] == "doc1"
+    assert hit1["doc"]["_rev"] == "1-a"
+    assert hit1["fields"] == %{"bar" => 0.0, "foo" => "baz"}
+
+    assert hit2["doc"]["_id"] == "doc3"
+    assert hit2["doc"]["_rev"] == "2-c"
+    assert hit2["fields"] == %{"bar" => 13.0, "foo" => "barX"}
+
+    assert hit3["doc"]["_id"] == "doc4"
+    assert hit3["doc"]["_rev"] == "1-b"
+    assert hit3["fields"] == %{"bar" => 43.0, "foo" => "fooX"}
+
+    # purge docs
+    purge_body = %{
+        "doc1" => ["2-c", "3-nonexistentrev"],
+        "doc2" => ["2-b"],
+        "doc3" => ["2-c"],
+        "doc4" => ["1-b"],
+    }
+    resp = Couch.post("/#{db_name}/_purge", body: purge_body)
+    assert_status_code(resp, 201)
+
+    resp = Couch.get(search_url, query: %{q: "*:*", include_docs: true})
+    assert_status_code(resp, 200)
+    hits = Enum.sort(resp.body["hits"])
+
+    assert get_total_hits(resp) == 2
+    [hit1, hit2] = Enum.sort(resp.body["hits"])
+
+    # doc1: 2-c deleted was purged, 1-a is still the winner
+    assert hit1["doc"]["_id"] == "doc1"
+    assert hit1["doc"]["_rev"] == "1-a"
+    assert hit1["fields"] ==  %{"bar" => 0.0, "foo" => "baz"}
+
+    # doc2: doc was deleted and now it's completely purged
+
+    # doc3: live revision is deleted, we're left with the deleted rev only
+
+    # doc4: 2-c was purged, 1-a is the new winner
+    assert hit2["doc"]["_id"] == "doc4"
+    assert hit2["doc"]["_rev"] == "1-a"
+    assert hit2["fields"] == %{"bar" => 42.0, "foo" => "foo"}
+
+    resp = Couch.get("/#{db_name}")
+    db_purge_seq = resp.body["purge_seq"]
+    # Double-check db purge sequence (sum of purge seqeunces on shards) is 4
+    assert String.starts_with?(db_purge_seq, "4-")
+
+    resp = Couch.get("/#{db_name}/_design/foo/_nouveau_info/bar")
+    assert_status_code(resp, 200)
+    db_info = info(db_name)
+    assert seq(db_info["update_seq"]) == resp.body["search_index"]["update_seq"]
+    assert seq(db_info["purge_seq"]) == resp.body["search_index"]["purge_seq"]
+  end
+
+  def seq(str) do
+    String.to_integer(hd(Regex.run(~r/^[0-9]+/, str)))
   end
 
 end

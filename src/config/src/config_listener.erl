@@ -13,7 +13,6 @@
 -module(config_listener).
 
 -behaviour(gen_event).
--vsn(2).
 
 %% Public interface
 -export([start/2]).
@@ -25,8 +24,7 @@
     handle_event/2,
     handle_call/2,
     handle_info/2,
-    terminate/2,
-    code_change/3
+    terminate/2
 ]).
 
 -callback handle_config_change(
@@ -70,6 +68,3 @@ handle_info(_Info, St) ->
 
 terminate(Reason, {Module, {Subscriber, State}}) ->
     Module:handle_config_terminate(Subscriber, Reason, State).
-
-code_change(_OldVsn, St, _Extra) ->
-    {ok, St}.

@@ -16,8 +16,9 @@
 
 include version.mk
 
-REBAR?=$(shell echo `pwd`/bin/rebar)
-ERLFMT?=$(shell echo `pwd`/bin/erlfmt)
+REBAR?=$(CURDIR)/bin/rebar
+REBAR3?=$(CURDIR)/bin/rebar3
+ERLFMT?=$(CURDIR)/bin/erlfmt
 
 # Handle the following scenarios:
 #   1. When building from a tarball, use version.mk.
@@ -73,7 +74,7 @@ DESTDIR=
 
 # Rebar options
 apps=
-skip_deps=folsom,meck,mochiweb,triq,proper,snappy,bcrypt,hyper,ibrowse
+skip_deps=meck,mochiweb,triq,proper,snappy,hyper,ibrowse
 suites=
 tests=
 
@@ -91,7 +92,7 @@ DIALYZE_OPTS=$(shell echo "\
 	" | sed -e 's/[a-z]\{1,\}= / /g')
 EXUNIT_OPTS=$(subst $(comma),$(space),$(tests))
 
-TEST_OPTS="-c 'startup_jitter=0' -c 'default_security=admin_local'"
+TEST_OPTS="-c 'startup_jitter=0' -c 'default_security=admin_local' -c 'iterations=9'"
 
 ################################################################################
 # Main commands
@@ -152,10 +153,11 @@ escriptize: couch
 .PHONY: check
 # target: check - Test everything
 check: all
-	@$(MAKE) exunit
+	@$(MAKE) xref
 	@$(MAKE) eunit
 	@$(MAKE) mango-test
-	@$(MAKE) elixir-suite
+	@$(MAKE) elixir
+	@$(MAKE) elixir-search
 	@$(MAKE) weatherreport-test
 	@$(MAKE) nouveau-test
 
@@ -167,9 +169,9 @@ endif
 
 .PHONY: eunit
 # target: eunit - Run EUnit tests, use EUNIT_OPTS to provide custom options
-eunit: export BUILDDIR = $(shell pwd)
-eunit: export ERL_AFLAGS = -config $(shell pwd)/rel/files/eunit.config
-eunit: export COUCHDB_QUERY_SERVER_JAVASCRIPT = $(shell pwd)/bin/couchjs $(shell pwd)/share/server/main.js
+eunit: export BUILDDIR = $(CURDIR)
+eunit: export ERL_AFLAGS = -config $(CURDIR)/rel/files/eunit.config
+eunit: export COUCHDB_QUERY_SERVER_JAVASCRIPT = $(CURDIR)/bin/couchjs $(CURDIR)/share/server/main.js
 eunit: export COUCHDB_TEST_ADMIN_PARTY_OVERRIDE=1
 eunit: couch
 	@COUCHDB_VERSION=$(COUCHDB_VERSION) COUCHDB_GIT_SHA=$(COUCHDB_GIT_SHA) $(REBAR) setup_eunit 2> /dev/null
@@ -178,30 +180,19 @@ eunit: couch
         done
 
 
-.PHONY: exunit
-# target: exunit - Run ExUnit tests, use EXUNIT_OPTS to provide custom options
-exunit: export BUILDDIR = $(shell pwd)
-exunit: export MIX_ENV=test
-exunit: export ERL_LIBS = $(shell pwd)/src
-exunit: export ERL_AFLAGS = -config $(shell pwd)/rel/files/eunit.config
-exunit: export COUCHDB_QUERY_SERVER_JAVASCRIPT = $(shell pwd)/bin/couchjs $(shell pwd)/share/server/main.js
-exunit: export COUCHDB_TEST_ADMIN_PARTY_OVERRIDE=1
-exunit: couch elixir-init setup-eunit
-	@mix test --trace $(EXUNIT_OPTS)
-
-setup-eunit: export BUILDDIR = $(shell pwd)
-setup-eunit: export ERL_AFLAGS = -config $(shell pwd)/rel/files/eunit.config
+setup-eunit: export BUILDDIR = $(CURDIR)
+setup-eunit: export ERL_AFLAGS = -config $(CURDIR)/rel/files/eunit.config
 setup-eunit:
 	@$(REBAR) setup_eunit 2> /dev/null
 
-just-eunit: export BUILDDIR = $(shell pwd)
-just-eunit: export ERL_AFLAGS = -config $(shell pwd)/rel/files/eunit.config
+just-eunit: export BUILDDIR = $(CURDIR)
+just-eunit: export ERL_AFLAGS = -config $(CURDIR)/rel/files/eunit.config
 just-eunit:
 	@$(REBAR) -r eunit $(EUNIT_OPTS)
 
 .PHONY: soak-eunit
-soak-eunit: export BUILDDIR = $(shell pwd)
-soak-eunit: export ERL_AFLAGS = -config $(shell pwd)/rel/files/eunit.config
+soak-eunit: export BUILDDIR = $(CURDIR)
+soak-eunit: export ERL_AFLAGS = -config $(CURDIR)/rel/files/eunit.config
 soak-eunit: couch
 	@$(REBAR) setup_eunit 2> /dev/null
 	while [ $$? -eq 0 ] ; do $(REBAR) -r eunit $(EUNIT_OPTS) ; done
@@ -236,14 +227,10 @@ python-black-update: .venv/bin/black
 		--exclude="build/|buck-out/|dist/|_build/|\.git/|\.hg/|\.mypy_cache/|\.nox/|\.tox/|\.venv/|src/rebar/pr2relnotes.py|src/fauxton" \
 		build-aux/*.py dev/run src/mango/test/*.py src/docs/src/conf.py src/docs/ext/*.py .
 
-.PHONY: elixir
-elixir: export MIX_ENV=integration
-elixir: export COUCHDB_TEST_ADMIN_PARTY_OVERRIDE=1
-elixir: elixir-init devclean
-	@dev/run "$(TEST_OPTS)" -a adm:pass -n 1 \
-		--enable-erlang-views \
-		--locald-config test/elixir/test/config/test-config.ini \
-		--no-eval 'mix test --trace --exclude without_quorum_test --exclude with_quorum_test $(EXUNIT_OPTS)'
+-include install.mk
+ifeq ($(with_nouveau), false)
+  exclude_nouveau=--exclude nouveau
+endif
 
 .PHONY: elixir-init
 elixir-init: MIX_ENV=integration
@@ -264,25 +251,36 @@ elixir-cluster-with-quorum: elixir-init devclean
 		--degrade-cluster 1 \
 		--no-eval 'mix test --trace --only with_quorum_test $(EXUNIT_OPTS)'
 
-.PHONY: elixir-suite
-# target: elixir-suite - Run Elixir-based integration tests
-elixir-suite: export MIX_ENV=integration
-elixir-suite: export COUCHDB_TEST_ADMIN_PARTY_OVERRIDE=1
-elixir-suite: elixir-init devclean
-	@dev/run -n 1 -q -a adm:pass \
+.PHONY: elixir
+# target: elixir - Run Elixir-based integration tests
+elixir: export MIX_ENV=integration
+elixir: elixir-init devclean
+	@dev/run "$(TEST_OPTS)" -n 1 -q -a adm:pass \
 		--enable-erlang-views \
 		--no-join \
 		--locald-config test/elixir/test/config/test-config.ini \
 		--erlang-config rel/files/eunit.config \
-		--no-eval 'mix test --trace --include test/elixir/test/config/suite.elixir --exclude test/elixir/test/config/skip.elixir'
+		--no-eval 'mix test --trace --include test/elixir/test/config/suite.elixir --exclude test/elixir/test/config/skip.elixir $(EXUNIT_OPTS)'
+
+ifneq ($(CLOUSEAU_DIR),)
+_WITH_CLOUSEAU="--with-clouseau --clouseau-dir=$(CLOUSEAU_DIR)"
+else ifeq ($(with_clouseau), 1)
+_WITH_CLOUSEAU="--with-clouseau"
+endif
 
 .PHONY: elixir-search
-# target: elixir-search - Run search tests, requires a running Clouseau instance
+# target: elixir-search - Run search tests, requires a configured Clouseau instance
 elixir-search: export MIX_ENV=integration
 elixir-search: elixir-init devclean
+ifneq ($(_WITH_CLOUSEAU), )
 	@dev/run -n 1 -q -a adm:pass \
+		"$(_WITH_CLOUSEAU)" \
+		"$(TEST_OPTS)" \
 		--locald-config test/config/test-config.ini \
 		--no-eval 'mix test --trace --include test/elixir/test/config/search.elixir'
+else
+	@echo "Warning: Clouseau is not enabled, \`elixir-search\` cannot be run."
+endif
 
 .PHONY: elixir-source-checks
 # target: elixir-source-checks - Check source code formatting of Elixir test files
@@ -327,25 +325,25 @@ list-eunit-suites:
 build-test:
 	@test/build/test-configure.sh
 
-
 .PHONY: mango-test
 # target: mango-test - Run Mango tests
-mango-test: export COUCHDB_TEST_ADMIN_PARTY_OVERRIDE=1
 mango-test: devclean all
-	@cd src/mango && \
-		python3 -m venv .venv && \
-		.venv/bin/python3 -m pip install -r requirements.txt
-	@cd src/mango && \
-		../../dev/run "$(TEST_OPTS)" \
+	@python3 -m venv src/mango/.venv && \
+		src/mango/.venv/bin/python3 -m pip install -r src/mango/requirements.txt
+	@dev/run \
+		"$(TEST_OPTS)" \
+		"$(_WITH_CLOUSEAU)" \
 		-n 1 \
 		--admin=adm:pass \
-		'COUCH_USER=adm COUCH_PASS=pass .venv/bin/python3 -m nose2 $(MANGO_TEST_OPTS)'
+		--no-eval "\
+COUCH_USER=adm COUCH_PASS=pass \
+src/mango/.venv/bin/nose2 -s src/mango/test -c src/mango/unittest.cfg $(MANGO_TEST_OPTS)"
 
 
 .PHONY: weatherreport-test
 # target: weatherreport-test - Run weatherreport against dev cluster
 weatherreport-test: devclean escriptize
-	@dev/run -n 1 -a adm:pass --no-eval \
+	@dev/run "$(TEST_OPTS)" -n 1 -a adm:pass --no-eval \
 		'bin/weatherreport --etc dev/lib/node1/etc --level error'
 
 ################################################################################
@@ -371,10 +369,11 @@ dialyze: .rebar
 	@$(REBAR) -r dialyze $(DIALYZE_OPTS)
 
 
-.PHONY: find_bugs
-# target: find_bugs - Find unused exports etc
-find_bugs:
-	@$(REBAR) --keep-going --recursive xref $(DIALYZE_OPTS)
+.PHONY: xref
+# target: xref - find unused exports etc
+xref:
+	@./build-aux/xref-helper.sh $(REBAR) $(DIALYZE_OPTS)
+
 
 .PHONY: introspect
 # target: introspect - Check for commits difference between rebar.config and repository
@@ -405,7 +404,6 @@ dist: all derived
 
 .PHONY: release
 # target: release - Create an Erlang release including CouchDB!
--include install.mk
 release: all
 	@echo "Installing CouchDB into rel/couchdb/ ..."
 	@rm -rf rel/couchdb
@@ -431,10 +429,10 @@ else
 endif
 endif
 
-ifeq ($(with_nouveau), 1)
-	@mkdir -p rel/couchdb/nouveau/
-	@cp nouveau/build/libs/server-*-dist.jar rel/couchdb/nouveau/
-	@cp nouveau/nouveau.yaml rel/couchdb/nouveau/
+ifeq ($(with_nouveau), true)
+	@mkdir rel/couchdb/nouveau
+	@cd nouveau && ./gradlew installDist
+	@cp -R nouveau/build/install/nouveau rel/couchdb
 endif
 
 	@echo "... done"
@@ -477,7 +475,7 @@ clean:
 	@rm -f src/couch/priv/couch_js/config.h
 	@rm -f dev/*.beam dev/devnode.* dev/pbkdf2.pyc log/crash.log
 	@rm -f src/couch_dist/certs/out
-ifeq ($(with_nouveau), 1)
+ifeq ($(with_nouveau), true)
 	@cd nouveau && ./gradlew clean
 endif
 
@@ -548,7 +546,8 @@ derived:
 .PHONY: nouveau
 # Build nouveau
 nouveau:
-ifeq ($(with_nouveau), 1)
+ifeq ($(with_nouveau), true)
+	@cd nouveau && ./gradlew spotlessApply
 	@cd nouveau && ./gradlew build -x test
 endif
 
@@ -557,7 +556,7 @@ nouveau-test: nouveau-test-gradle nouveau-test-elixir
 
 .PHONY: nouveau-test-gradle
 nouveau-test-gradle: couch nouveau
-ifeq ($(with_nouveau), 1)
+ifeq ($(with_nouveau), true)
 	@cd nouveau && ./gradlew test
 endif
 
@@ -565,8 +564,8 @@ endif
 nouveau-test-elixir: export MIX_ENV=integration
 nouveau-test-elixir: elixir-init devclean
 nouveau-test-elixir: couch nouveau
-ifeq ($(with_nouveau), 1)
-	@dev/run -n 1 -q -a adm:pass --with-nouveau \
+ifeq ($(with_nouveau), true)
+	@dev/run "$(TEST_OPTS)" -n 1 -q -a adm:pass --with-nouveau \
 		--locald-config test/config/test-config.ini \
 		--no-eval 'mix test --trace --include test/elixir/test/config/nouveau.elixir'
 endif

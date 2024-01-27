@@ -14,7 +14,6 @@
 
 -module(dreyfus_index_manager).
 -behaviour(gen_server).
--vsn(1).
 -include_lib("couch/include/couch_db.hrl").
 -include("dreyfus.hrl").
 
@@ -29,9 +28,7 @@
     init/1,
     handle_call/3,
     handle_cast/2,
-    handle_info/2,
-    terminate/2,
-    code_change/3
+    handle_info/2
 ]).
 
 -export([handle_db_event/3]).
@@ -111,12 +108,6 @@ handle_info({'EXIT', FromPid, Reason}, State) ->
             delete_from_ets(FromPid, DbName, Sig)
     end,
     {noreply, State}.
-
-terminate(_Reason, _State) ->
-    ok.
-
-code_change(_OldVsn, nil, _Extra) ->
-    {ok, nil}.
 
 % private functions
 

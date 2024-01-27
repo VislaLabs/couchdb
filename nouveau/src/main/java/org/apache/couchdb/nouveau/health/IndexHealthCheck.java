@@ -42,7 +42,7 @@ public final class IndexHealthCheck extends HealthCheck {
         indexResource.createIndex(name, new IndexDefinition("standard", null));
         try {
             final DocumentUpdateRequest documentUpdateRequest =
-                    new DocumentUpdateRequest(1, null, Collections.emptyList());
+                    new DocumentUpdateRequest(0, 1, null, Collections.emptyList());
             indexResource.updateDoc(name, "foo", documentUpdateRequest);
 
             final SearchRequest searchRequest = new SearchRequest();
@@ -51,10 +51,12 @@ public final class IndexHealthCheck extends HealthCheck {
             final SearchResults searchResults = indexResource.searchIndex(name, searchRequest);
             if (searchResults.getTotalHits() == 1) {
                 return Result.healthy();
+            } else {
+                return Result.unhealthy(
+                        "Wrong number of search results, expected 1, got %d", searchResults.getTotalHits());
             }
         } finally {
             indexResource.deletePath(name, null);
         }
-        return Result.unhealthy(name);
     }
 }

@@ -13,12 +13,11 @@
 -module(couch_server).
 -behaviour(gen_server).
 -behaviour(config_listener).
--vsn(3).
 
 -export([open/2, create/2, delete/2, get_version/0, get_version/1, get_git_sha/0, get_uuid/0]).
 -export([all_databases/0, all_databases/2]).
 -export([init/1, handle_call/3, sup_start_link/1]).
--export([handle_cast/2, code_change/3, handle_info/2, terminate/2]).
+-export([handle_cast/2, handle_info/2, terminate/2]).
 -export([dev_start/0, is_admin/2, has_admins/0, get_stats/0]).
 -export([close_db_if_idle/1]).
 -export([delete_compaction_files/1]).
@@ -357,7 +356,7 @@ handle_config_change("couchdb_engines", _, _, _, N) ->
     {ok, N};
 handle_config_change("admins", _, _, Persist, 1 = N) ->
     % async hashing on couch_server with number 1 only
-    couch_password_hasher:hash(Persist),
+    couch_password_hasher:hash_admin_passwords(Persist),
     {ok, N};
 handle_config_change("httpd", "authentication_handlers", _, _, 1 = N) ->
     couch_httpd:stop(),
@@ -719,9 +718,6 @@ handle_cast({close_db_if_idle, DbName}, Server) ->
     end;
 handle_cast(Msg, Server) ->
     {stop, {unknown_cast_message, Msg}, Server}.
-
-code_change(_OldVsn, #server{} = State, _Extra) ->
-    {ok, State}.
 
 handle_info({'EXIT', _Pid, config_change}, Server) ->
     {stop, config_change, Server};

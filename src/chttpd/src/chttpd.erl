@@ -250,7 +250,7 @@ handle_request_int(MochiReq) ->
                 P
         end,
 
-    Peer = peer(MochiReq),
+    Peer = MochiReq:get(peer),
 
     Method1 =
         case MochiReq:get(method) of
@@ -320,6 +320,9 @@ handle_request_int(MochiReq) ->
     erlang:put(dont_log_request, true),
     erlang:put(dont_log_response, true),
 
+    % Save client socket so that it can be monitored for disconnects
+    chttpd_util:mochiweb_client_req_set(MochiReq),
+
     {HttpReq2, Response} =
         case before_request(HttpReq0) of
             {ok, HttpReq1} ->
@@ -327,6 +330,8 @@ handle_request_int(MochiReq) ->
             {error, Response0} ->
                 {HttpReq0, Response0}
         end,
+
+    chttpd_util:mochiweb_client_req_clean(),
 
     {Status, Code, Reason, Resp} = split_response(Response),
 
@@ -1138,6 +1143,8 @@ error_info(timeout) ->
     >>};
 error_info({service_unavailable, Reason}) ->
     {503, <<"service unavailable">>, Reason};
+error_info({insufficient_storage, Reason}) ->
+    {507, <<"insufficent_storage">>, Reason};
 error_info({timeout, _Reason}) ->
     error_info(timeout);
 error_info({'EXIT', {Error, _Stack}}) ->
@@ -1470,23 +1477,6 @@ get_user(#httpd{user_ctx = #user_ctx{name = User}}) ->
     couch_util:url_encode(User);
 get_user(#httpd{user_ctx = undefined}) ->
     "undefined".
-
-peer(MochiReq) ->
-    Socket = MochiReq:get(socket),
-    case mochiweb_socket:peername(Socket) of
-        {ok, {{O1, O2, O3, O4}, Port}} ->
-            io_lib:format(
-                "~B.~B.~B.~B:~B",
-                [O1, O2, O3, O4, Port]
-            );
-        {ok, {{O1, O2, O3, O4, O5, O6, O7, O8}, Port}} ->
-            io_lib:format(
-                "~B.~B.~B.~B.~B.~B.~B.~B:~B",
-                [O1, O2, O3, O4, O5, O6, O7, O8, Port]
-            );
-        {error, _Reason} ->
-            MochiReq:get(peer)
-    end.
 
 -ifdef(TEST).
 

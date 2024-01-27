@@ -12,7 +12,6 @@
 
 -module(ddoc_cache_entry).
 -behaviour(gen_server).
--vsn(1).
 
 % for the stacktrace macro only so far
 -include_lib("couch/include/couch_db.hrl").
@@ -35,8 +34,7 @@
     terminate/2,
     handle_call/3,
     handle_cast/2,
-    handle_info/2,
-    code_change/3
+    handle_info/2
 ]).
 
 -export([
@@ -257,9 +255,6 @@ handle_info({'DOWN', _, _, Pid, Resp}, #st{key = Key, opener = Pid} = St) ->
     end;
 handle_info(Msg, St) ->
     {stop, {bad_info, Msg}, St}.
-
-code_change(_, St, _) ->
-    {ok, St}.
 
 spawn_opener(Key) ->
     {Pid, _} = erlang:spawn_monitor(?MODULE, do_open, [Key]),

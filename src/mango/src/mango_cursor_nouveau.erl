@@ -35,10 +35,11 @@
     user_fun,
     user_acc,
     fields,
-    execution_stats
+    execution_stats,
+    documents_seen
 }).
 
-create(Db, Indexes, Selector, Opts) ->
+create(Db, {Indexes, Trace}, Selector, Opts) ->
     Index =
         case Indexes of
             [Index0] ->
@@ -56,6 +57,7 @@ create(Db, Indexes, Selector, Opts) ->
         db = Db,
         index = Index,
         ranges = null,
+        trace = Trace,
         selector = Selector,
         opts = Opts,
         limit = Limit,
@@ -102,7 +104,8 @@ execute(Cursor, UserFun, UserAcc) ->
         user_fun = UserFun,
         user_acc = UserAcc,
         fields = Cursor#cursor.fields,
-        execution_stats = mango_execution_stats:log_start(Stats)
+        execution_stats = mango_execution_stats:log_start(Stats),
+        documents_seen = sets:new([{version, 2}])
     },
     try
         case Query of
@@ -170,26 +173,39 @@ handle_hit(CAcc0, Hit, Doc) ->
     #cacc{
         limit = Limit,
         skip = Skip,
-        execution_stats = Stats
+        execution_stats = Stats,
+        documents_seen = Seen
     } = CAcc0,
     CAcc1 = update_bookmark(CAcc0, Hit),
     Stats1 = mango_execution_stats:incr_docs_examined(Stats),
     couch_stats:increment_counter([mango, docs_examined]),
     CAcc2 = CAcc1#cacc{execution_stats = Stats1},
     case mango_selector:match(CAcc2#cacc.selector, Doc) of
-        true when Skip > 0 ->
-            CAcc2#cacc{skip = Skip - 1};
-        true when Limit == 0 ->
-            % We hit this case if the user spcified with a
-            % zero limit. Notice that in this case we need
-            % to return the bookmark from before this match
-            throw({stop, CAcc0});
-        true when Limit == 1 ->
-            NewCAcc = apply_user_fun(CAcc2, Doc),
-            throw({stop, NewCAcc});
-        true when Limit > 1 ->
-            NewCAcc = apply_user_fun(CAcc2, Doc),
-            NewCAcc#cacc{limit = Limit - 1};
+        true ->
+            DocId = mango_doc:get_field(Doc, <<"_id">>),
+            case sets:is_element(DocId, Seen) of
+                true ->
+                    CAcc2;
+                false ->
+                    CAcc3 = CAcc2#cacc{
+                        documents_seen = sets:add_element(DocId, Seen)
+                    },
+                    if
+                        Skip > 0 ->
+                            CAcc3#cacc{skip = Skip - 1};
+                        Limit == 0 ->
+                            % We hit this case if the user specified with a
+                            % zero limit. Notice that in this case we need
+                            % to return the bookmark from before this match.
+                            throw({stop, CAcc0});
+                        Limit == 1 ->
+                            CAcc4 = apply_user_fun(CAcc3, Doc),
+                            throw({stop, CAcc4});
+                        Limit > 1 ->
+                            CAcc4 = apply_user_fun(CAcc3, Doc),
+                            CAcc4#cacc{limit = Limit - 1}
+                    end
+            end;
         false ->
             CAcc2
     end.

@@ -152,9 +152,9 @@ Configure the source by running::
 
     ./configure
 
-If you intend to run the test suites::
+If you intend to run the test suites with Clouseau::
 
-    ./configure -c
+    ./configure --enable-clouseau
 
 If you don't want to build Fauxton or documentation specify
 ``--disable-fauxton`` and/or ``--disable-docs`` arguments for ``configure`` to
@@ -191,11 +191,11 @@ To run all the tests use run::
     make check
 
 You can also run each test suite individually via the ``eunit``, ``mango-test``,
-``elixir-suite``, and ``weatherreport-test`` targets::
+``elixir``, and ``weatherreport-test`` targets::
 
     make eunit
     make mango-test
-    make elixir-suite
+    make elixir
     make weatherreport-test
 
 Erlang Unit Tests
@@ -226,25 +226,19 @@ to specify exact ``rebar eunit`` options::
 Elixir Integration Tests
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
-All the Elixir-based integration tests could be by the `elixir-suite`
+All the Elixir-based integration tests could be by the `elixir`
 target::
 
-    make elixir-suite
+    make elixir
 
 There is an additional suite for Dreyfus, which is not run
-automatically by either the ``elixir-suite`` or the ``check`` target
+automatically by either the ``elixir`` or the ``check`` target
 but it could be done manually via the corresponding target::
 
     make elixir-search
 
-Note that this requires a running Clouseau instance with the name
-``clouseau@127.0.0.1``.  The easiest way to get it is to clone the
-`cloudant-labs/clouseau <https://github.com/cloudant-labs/clouseau>`_
-repository and launch it run there once all the prerequisites (JDK,
-Scala, and Maven) have been installed successfully, e.g.::
-
-    git clone https://github.com/cloudant-labs/clouseau
-    mvn -f clouseau/pom.xml scala:run
+Note that this requires Clouseau to be configured for running, see
+above.
 
 Mango Integration Tests
 ~~~~~~~~~~~~~~~~~~~~~~~
@@ -262,7 +256,7 @@ the implementation.  Consult its documentation for more information.
 
 Tests that rely on text indexes are run only if the ``search`` feature
 is reported to be available (i.e. a working Clouseau instance is
-connected), otherwise they will be skipped.
+configured and working), otherwise they will be skipped.
 
 Note that the databases that are created during the tests will be all
 removed after each of the suites completed.  However, with the help of
@@ -271,6 +265,83 @@ to keep those databases around for further investigation::
 
     MANGO_TESTS_KEEP_DBS=please \
       make mango-test MANGO_TEST_OPTS='03-operator-test'
+
+Running Clouseau
+~~~~~~~~~~~~~~~~
+
+When configured with the ``./configure`` script, the ``./dev/run``
+script is capable of launching Clouseau instances alongside the
+CouchDB nodes and hooking them up.  This is what the ``mango-test``
+and ``elixir-search`` targets also use to run their respective test
+suites, and let Clouseau automatically manage them.
+
+Although the ``./configure`` and the ``./dev/run`` scripts try to take
+care of the details of the Clouseau deployment, it is still the
+responsibility of the user to provide a suitable Java environment for
+running.  Clouseau can run with JRE 1.7 and 1.8 only.  Also, when
+Nouveau is in use, which uses a more recent Java environment, the old
+JDK has to be installed separately and the ``CLOUSEAU_JAVA_HOME``
+environment variable has to be set to point its location.
+
+Fortunately, the ```asdf`` tool <https://asdf-vm.com/>` provides a
+convenient way to install old versions of JDK through its ```java``
+plugin <https://github.com/halcyon/asdf-java>`::
+
+    asdf plugin add java
+
+Then use ``asdf`` to install it::
+
+    asdf install java zulu-jre-8.74.0.17
+
+Finally, use ``asdf`` to set the ``CLOUSEAU_JAVA_HOME`` environment
+variable::
+
+    export CLOUSEAU_JAVA_HOME=$(asdf where java zulu-jre-8.74.0.17)
+
+If the use of ``asdf`` is not an option, `the Zulu site
+<https://cdn.azul.com/zulu/bin/>` could be used directly to get the
+distribution package for the appropriate JRE version.  But this is
+just one of the possibilities to access installers for old Java
+environments.
+
+Once both Clouseau and the corresponding Java environment are set,
+they are not put in use automatically.  In order to do so, the
+``./dev/run`` script needs to be run with Clouseau enabled as
+follows::
+
+    dev/run --with-clouseau
+
+When a specific Erlang cookie string is set in
+``rel/overlay/etc/vm.args``, the ``--erlang-cookie`` flag could be
+used to configure Clouseau to work with that::
+
+    dev/run --with-clouseau --erlang-cookie=brumbrum
+
+It is possible to override Clouseau's location per invocation of
+``./dev/run`` in case some other version needs to be exercised for the
+moment.  This can be done with the help of the ``--clouseau-dir``
+flag.  The specified location could be either an unpacked bundle of
+JAR files or a git clone of the Clouseau source code repository::
+
+    dev/run --with-clouseau --clouseau-dir $HOME/git/clouseau.wip
+
+Through the ``CLOUSEAU_DIR`` variable the same could be forwarded to the
+respective test targets, e.g. ``mango-test``::
+
+    make mango-test CLOUSEAU_DIR=$HOME/git/clouseau.wip
+
+This can even be done if there was no local Clouseau deployment
+configured previously.  Mind that this will require building Clouseau
+from source, which causes the nodes start up somewhat slower.  It also
+requires JDK 1.7 and Apache Maven 3.8 to be present, that is why it is
+important the set the ``CLOUSEAU_JAVA_HOME`` and the
+``CLOUSEAU_M2_HOME`` environment variables accordingly, for instance::
+
+    asdf install java zulu-7.56.0.11
+    asdf plugin add maven
+    asdf install maven 3.8.8
+    export CLOUSEAU_JAVA_HOME=$(asdf where java zulu-7.56.0.11)
+    export CLOUSEAU_M2_HOME=$(asdf where maven 3.8.8)
 
 Static Code Analysis
 ~~~~~~~~~~~~~~~~~~~~

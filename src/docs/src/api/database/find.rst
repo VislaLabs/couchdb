@@ -12,9 +12,9 @@
 
 .. _api/db/_find:
 
-================
+===============
 ``/{db}/_find``
-================
+===============
 
 .. http:post:: /{db}/_find
     :synopsis: Find documents within a given database.
@@ -42,9 +42,14 @@
         should be returned. If it is omitted, the entire object is returned.
         More information provided in the section on :ref:`filtering fields
         <find/filter>`. *Optional*
-    :<json string|array use_index: Instruct a query to use a specific index.
-        Specified either as ``"<design_document>"`` or
-        ``["<design_document>", "<index_name>"]``. *Optional*
+    :<json string|array use_index: Request a query to use a specific
+        index. Specified either as ``"<design_document>"`` or
+        ``["<design_document>", "<index_name>"]``. It is not
+        guaranteed that the index will be actually used because if the
+        index is not valid for the selector, fallback to a valid index
+        is attempted. Therefore that is more like a hint. When
+        fallback occurs, the details are given in the ``warning``
+        field of the response. *Optional*
     :<json boolean conflicts: Include conflicted documents if ``true``.
         Intended use is to easily find conflicted documents, without an
         index or view. Default is ``false``. *Optional*
@@ -195,8 +200,9 @@ A simple selector, inspecting specific fields:
 
 You can create more complex selector expressions by combining operators.
 For best performance, it is best to combine 'combination' or
-'array logical' operators, such as ``$regex``, with an equality
-operators such as ``$eq``, ``$gt``, ``$gte``, ``$lt``, and ``$lte``
+'array logical' operators, such as ``$regex``, with an operator
+that defines a contiguous range of keys such as ``$eq``,
+``$gt``, ``$gte``, ``$lt``, ``$lte``, and ``$beginsWith``
 (but not ``$ne``). For more information about creating complex
 selector expressions, see :ref:`creating selector expressions
 <find/expressions>`.
@@ -668,68 +674,74 @@ In addition, some 'meta' condition operators are available. Some condition
 operators accept any valid JSON content as the argument.  Other condition
 operators require the argument to be in a specific JSON format.
 
-+---------------+-------------+------------+-----------------------------------+
-| Operator type | Operator    | Argument   | Purpose                           |
-+===============+=============+============+===================================+
-| (In)equality  | ``$lt``     | Any JSON   | The field is less than the        |
-|               |             |            | argument.                         |
-+---------------+-------------+------------+-----------------------------------+
-|               | ``$lte``    | Any JSON   | The field is less than or equal to|
-|               |             |            | the argument.                     |
-+---------------+-------------+------------+-----------------------------------+
-|               | ``$eq``     | Any JSON   | The field is equal to the argument|
-+---------------+-------------+------------+-----------------------------------+
-|               | ``$ne``     | Any JSON   | The field is not equal to the     |
-|               |             |            | argument.                         |
-+---------------+-------------+------------+-----------------------------------+
-|               | ``$gte``    | Any JSON   | The field is greater than or equal|
-|               |             |            | to the argument.                  |
-+---------------+-------------+------------+-----------------------------------+
-|               | ``$gt``     | Any JSON   | The field is greater than the     |
-|               |             |            | to the argument.                  |
-+---------------+-------------+------------+-----------------------------------+
-| Object        | ``$exists`` | Boolean    | Check whether the field exists or |
-|               |             |            | not, regardless of its value.     |
-+---------------+-------------+------------+-----------------------------------+
-|               | ``$type``   | String     | Check the document field's type.  |
-|               |             |            | Valid values are ``"null"``,      |
-|               |             |            | ``"boolean"``, ``"number"``,      |
-|               |             |            | ``"string"``, ``"array"``, and    |
-|               |             |            | ``"object"``.                     |
-+---------------+-------------+------------+-----------------------------------+
-| Array         | ``$in``     | Array of   | The document field must exist in  |
-|               |             | JSON values| the list provided.                |
-+---------------+-------------+------------+-----------------------------------+
-|               | ``$nin``    | Array of   | The document field not must exist |
-|               |             | JSON values| in the list provided.             |
-+---------------+-------------+------------+-----------------------------------+
-|               | ``$size``   | Integer    | Special condition to match the    |
-|               |             |            | length of an array field in a     |
-|               |             |            | document. Non-array fields cannot |
-|               |             |            | match this condition.             |
-+---------------+-------------+------------+-----------------------------------+
-| Miscellaneous | ``$mod``    | [Divisor,  | Divisor is a non-zero integer,    |
-|               |             | Remainder] | Remainder is any integer.         |
-|               |             |            | Non-integer values result in a    |
-|               |             |            | 404. Matches documents where      |
-|               |             |            | ``field % Divisor == Remainder``  |
-|               |             |            | is true, and only when the        |
-|               |             |            | document field is an integer.     |
-+---------------+-------------+------------+-----------------------------------+
-|               | ``$regex``  | String     | A regular expression pattern to   |
-|               |             |            | match against the document field. |
-|               |             |            | Only matches when the field is a  |
-|               |             |            | string value and matches the      |
-|               |             |            | supplied regular expression. The  |
-|               |             |            | matching algorithms are based on  |
-|               |             |            | the Perl Compatible Regular       |
-|               |             |            | Expression (PCRE) library. For    |
-|               |             |            | more information about what is    |
-|               |             |            | implemented, see the see the      |
-|               |             |            | `Erlang Regular Expression        |
-|               |             |            | <http://erlang.org/doc            |
-|               |             |            | /man/re.html>`_.                  |
-+---------------+-------------+------------+-----------------------------------+
++---------------+-----------------+-------------+------------------------------------+
+| Operator type |    Operator     |  Argument   |              Purpose               |
++===============+=================+=============+====================================+
+| (In)equality  | ``$lt``         | Any JSON    | The field is less than the         |
+|               |                 |             | argument.                          |
++---------------+-----------------+-------------+------------------------------------+
+|               | ``$lte``        | Any JSON    | The field is less than or equal to |
+|               |                 |             | the argument.                      |
++---------------+-----------------+-------------+------------------------------------+
+|               | ``$eq``         | Any JSON    | The field is equal to the argument.|
++---------------+-----------------+-------------+------------------------------------+
+|               | ``$ne``         | Any JSON    | The field is not equal to the      |
+|               |                 |             | argument.                          |
++---------------+-----------------+-------------+------------------------------------+
+|               | ``$gte``        | Any JSON    | The field is greater than or equal |
+|               |                 |             | to the argument.                   |
++---------------+-----------------+-------------+------------------------------------+
+|               | ``$gt``         | Any JSON    | The field is greater than the      |
+|               |                 |             | argument.                          |
++---------------+-----------------+-------------+------------------------------------+
+| Object        | ``$exists``     | Boolean     | Check whether the field exists or  |
+|               |                 |             | not, regardless of its value.      |
++---------------+-----------------+-------------+------------------------------------+
+|               | ``$type``       | String      | Check the document field's type.   |
+|               |                 |             | Valid values are ``"null"``,       |
+|               |                 |             | ``"boolean"``, ``"number"``,       |
+|               |                 |             | ``"string"``, ``"array"``, and     |
+|               |                 |             | ``"object"``.                      |
++---------------+-----------------+-------------+------------------------------------+
+| Array         | ``$in``         | Array of    | The document field must exist in   |
+|               |                 | JSON values | the list provided.                 |
++---------------+-----------------+-------------+------------------------------------+
+|               | ``$nin``        | Array of    | The document field not must exist  |
+|               |                 | JSON values | in the list provided.              |
++---------------+-----------------+-------------+------------------------------------+
+|               | ``$size``       | Integer     | Special condition to match the     |
+|               |                 |             | length of an array field in a      |
+|               |                 |             | document. Non-array fields cannot  |
+|               |                 |             | match this condition.              |
++---------------+-----------------+-------------+------------------------------------+
+| Miscellaneous | ``$mod``        | [Divisor,   | Divisor is a non-zero integer,     |
+|               |                 | Remainder]  | Remainder is any integer.          |
+|               |                 |             | Non-integer values result in a     |
+|               |                 |             | 404. Matches documents where       |
+|               |                 |             | ``field % Divisor == Remainder``   |
+|               |                 |             | is true, and only when the         |
+|               |                 |             | document field is an integer.      |
++---------------+-----------------+-------------+------------------------------------+
+|               | ``$regex``      | String      | A regular expression pattern to    |
+|               |                 |             | match against the document field.  |
+|               |                 |             | Only matches when the field is a   |
+|               |                 |             | string value and matches the       |
+|               |                 |             | supplied regular expression. The   |
+|               |                 |             | matching algorithms are based on   |
+|               |                 |             | the Perl Compatible Regular        |
+|               |                 |             | Expression (PCRE) library. For     |
+|               |                 |             | more information about what is     |
+|               |                 |             | implemented, see the               |
+|               |                 |             | `Erlang Regular Expression         |
+|               |                 |             | <http://erlang.org/doc             |
+|               |                 |             | /man/re.html>`_.                   |
++---------------+-----------------+-------------+------------------------------------+
+|               | ``$beginsWith`` | String      | Matches where the document field   |
+|               |                 |             | begins with the specified prefix   |
+|               |                 |             | (case-sensitive). If the document  |
+|               |                 |             | field contains a non-string value, |
+|               |                 |             | the document is not matched.       |
++---------------+-----------------+-------------+------------------------------------+
 
 .. warning::
     Regular expressions do not work with indexes, so they should not be used to
@@ -748,9 +760,12 @@ In general, whenever you have an operator that takes an argument, that argument
 can itself be another operator with arguments of its own. This enables us to
 build up more complex selector expressions.
 
-However, only equality operators such as ``$eq``, ``$gt``, ``$gte``, ``$lt``,
-and ``$lte`` (but not ``$ne``) can be used as the basis of a query. You should
-include at least one of these in a selector.
+However, only operators that define a contiguous range of values
+such as ``$eq``, ``$gt``, ``$gte``, ``$lt``, ``$lte``,
+and ``$beginsWith`` (but not ``$ne``) can be used as the basis
+of a query that can make efficient use of a ``json`` index. You should
+include at least one of these in a selector, or consider using
+a ``text`` index if greater flexibility is required.
 
 For example, if you try to perform a query that attempts to match all documents
 that have a field called `afieldname` containing a value that begins with the
@@ -1391,7 +1406,7 @@ it easier to take advantage of future improvements to query planning
     :>header Content-Type: - :mimetype:`application/json`
     :>header Transfer-Encoding: ``chunked``
 
-    :>json boolean covered: Tell if the query could be answered only
+    :>json boolean covering: Tell if the query could be answered only
         by relying on the data stored in the index.  When ``true``, no
         documents are fetched, which results in a faster response.
     :>json string dbname: Name of database.
@@ -1401,8 +1416,16 @@ it easier to take advantage of future improvements to query planning
     :>json object mrargs: Arguments passed to the underlying view.
     :>json number limit: Limit parameter used.
     :>json number skip: Skip parameter used.
-    :>json array fields: Fields to be returned by the query.
+    :>json array fields: Fields to be returned by the query.  The `[]`
+       value here means all the fields, since there is no projection
+       happening in that case.
     :>json boolean partitioned: The database is partitioned or not.
+    :>json array index_candidates: The list of all indexes that were
+       found but not selected for serving the query.  See :ref:`the
+       section on index selection <find/index_selection>` below for
+       the details.
+    :>json object selector_hints: Extra information on the selector to
+       provide insights about its usability.
 
     :code 200: Request completed successfully
     :code 400: Invalid request
@@ -1441,13 +1464,12 @@ it easier to take advantage of future improvements to query planning
         Transfer-Encoding: chunked
 
         {
-            "covered": false,
             "dbname": "movies",
             "index": {
                 "ddoc": "_design/0d61d9177426b1e2aa8d0fe732ec6e506f5d443c",
                 "name": "0d61d9177426b1e2aa8d0fe732ec6e506f5d443c",
-                "partitioned": false,
                 "type": "json",
+                "partitioned": false,
                 "def": {
                     "fields": [
                         {
@@ -1456,12 +1478,14 @@ it easier to take advantage of future improvements to query planning
                     ]
                 }
             },
+            "partitioned": false,
             "selector": {
                 "year": {
                     "$gt": 2010
                 }
             },
             "opts": {
+                "use_index": [],
                 "bookmark": "nil",
                 "limit": 2,
                 "skip": 0,
@@ -1472,32 +1496,13 @@ it easier to take advantage of future improvements to query planning
                     "year",
                     "title"
                 ],
-                "r": [
-                    49
-                ],
-                "conflicts": false,
-                "execution_stats": false,
                 "partition": "",
-                "stable": false,
+                "r": 1,
+                "conflicts": false,
                 "stale": false,
                 "update": true,
-                "use_index": []
-            },
-            "mrargs": {
-                "conflicts": "undefined",
-                "direction": "fwd",
-                "end_key": [
-                    "<MAX>"
-                ],
-                "include_docs": true,
-                "partition": null,
-                "reduce": false,
                 "stable": false,
-                "start_key": [
-                    2010
-                ],
-                "update": true,
-                "view_type": "map"
+                "execution_stats": false
             },
             "limit": 2,
             "skip": 0,
@@ -1507,23 +1512,221 @@ it easier to take advantage of future improvements to query planning
                 "year",
                 "title"
             ],
-            "partitioned": false
+            "mrargs": {
+                "include_docs": true,
+                "view_type": "map",
+                "reduce": false,
+                "partition": null,
+                "start_key": [
+                    2010
+                ],
+                "end_key": [
+                    "<MAX>"
+                ],
+                "direction": "fwd",
+                "stable": false,
+                "update": true,
+                "conflicts": "undefined"
+            },
+            "covering": false
+            "index_candidates": [
+                {
+                    "index": {
+                        "ddoc": null,
+                        "name": "_all_docs",
+                        "type": "special",
+                        "def": {
+                            "fields": [
+                                {
+                                    "_id": "asc"
+                                }
+                            ]
+                        }
+                    },
+                    "analysis": {
+                        "usable": true,
+                        "reasons": [
+                            {
+                                "name": "unfavored_type"
+                            }
+                        ],
+                        "ranking": 1,
+                        "covering": null
+                    }
+                }
+            ],
+            "selector_hints": [
+                {
+                    "type": "json",
+                    "indexable_fields": [
+                        "year"
+                    ],
+                    "unindexable_fields": []
+                }
+            ]
         }
+
+.. _find/index_selection:
 
 Index selection
 ===============
 
 :ref:`_find <api/db/_find>` chooses which index to use for responding
-to a query, unless you specify an index at query time.
-
-The query planner looks at the selector section and finds the index with the
-closest match to operators and fields used in the query. If there are two
-or more json type indexes that match, the index with the smallest
-number of fields in the index is preferred.
-If there are still two or more candidate indexes,
-the index with the first alphabetical name is chosen.
+to a query, unless you specify an index at query time.  In this
+section, a brief overview of the index selection process is presented.
 
 .. note::
-    It is good practice to specify indexes explicitly in your queries. This
-    prevents existing queries being affected by new indexes that might get added
-    in a production environment.
+
+    It is good practice to specify indexes explicitly in your
+    queries. This prevents existing queries being affected by new
+    indexes that might get added in a production environment.
+
+.. note::
+
+   Both the :ref:`_explain <api/db/find/explain>` and :ref:`_find
+   <api/db/_find>` endpoints rely on the same index selection logic.
+   But :ref:`_explain <api/db/find/explain>` is a bit more elaborate,
+   therefore it could be used for simulation and exploration.  In the
+   output, details for discarding indexes are placed in the
+   ``analysis`` field of the JSON objects under ``index_candidates``.
+   Under ``analysis`` the exact reason is listed in the ``reasons``
+   field.  Each reason has a specific code, which will be mentioned at
+   the relevant subsections below.
+
+The index selection happens in multiple rounds.
+
+.. figure:: ../../../images/index-selection-steps.svg
+     :align: center
+     :alt: Steps of index selection
+
+     Steps of index selection
+
+First, all the indexes for the database are collected.  The result
+always includes the special entity called `all docs` which is the
+primary index on the ``_id`` field.  This is reserved as a catch-all
+answer when no other suitable indexes could be found, but its use of
+discouraged for performance reasons.
+
+In the next round, :ref:`partial indexes <find/partial_indexes>` are
+eliminated unless specified in the ``use_index`` field of the query
+object.
+
+After that, indexes are filtered according whether a global or
+partitioned query was issued.  Indexes that do not match the query
+scope are assigned a ``scope_mismatch`` reason code.
+
+The remaining indexes are filtered by a series of usability checks.
+
+Each usability check is supplied with its own reason code.  That is
+``field_mismatch`` for the cases when the fields in the index do not
+match with that of the selector.  The code ``sort_order_mismatch``
+means that the requested sorting does not align with the index.
+These checks depend on the type of index.
+
+- ``"special"``: Usable if no ``sort`` is specified in the query or
+  ``sort`` is specified on ``_id`` only.
+
+- ``"json"``: The selector must not request a free-form text search
+  via the ``$text`` operator.  The ``needs_text_search`` reason code
+  is returned otherwise.
+
+  All the fields in the index must be referenced by the ``selector``
+  or ``sort`` in the query.
+
+  Any ``sort`` specified in the query must match the order of the
+  fields in the index.
+
+- ``"text"``: The index must contain fields that are referenced by the
+  query ``"selector"`` or ``"sort"``.
+
+  The ``"text"`` indexes do not work empty selectors, and they return
+  a ``empty_selector`` reason code in response to that.
+
+After the usable indexes having gathered, the user-specified index is
+verified next.  If this is a valid, usable index, then every other
+usable index is excluded with the ``excluded_by_user`` code.
+Otherwise, it is ignored an the process continues with the rest of the
+usable indexes.
+
+There is a natural order of preference among the various index types:
+``"json"``, ``"text"``, and then ``"special"``.  The usable indexes
+are grouped by their types in this order and the search is narrowed
+down to the elements of the first group.  That is, even if there is a
+``"text"`` index present that could match with the selector, it might
+be discarded if a ``"json"`` index with the suitable fields could be
+identified.  Indexes dropped in this round are all tagged with the
+``unfavored_type`` reason code.
+
+There could be only a single ``"text"`` and ``"special"`` index per
+database, hence the selection ends in this phase for thoses cases.
+For ``"json"`` indexes, an additional round is run to find the ideal
+index.
+
+The query planner looks at the selector section and finds the index
+with the closest match to operators and fields used in the query.
+This is described by the ``less_overlap`` reason code.  If there are
+two or more ``"json"``-type indexes that match, the index with the
+least number of fields in the index is preferred.  This is marked by
+the ``too_many_fields`` reason code.  If there are still two or more
+candidate indexes, the index with the first alphabetical name is
+chosen.  This is reflected by the ``alphabetically_comes_after``
+reason code.
+
++--------------------------------+------------+------------------------------------------+
+| Reason Code                    | Index Type | Description                              |
++================================+============+==========================================+
+| ``alphabetically_comes_after`` | json       | There is another suitable index whose    |
+|                                |            | name comes before that of this index.    |
++--------------------------------+------------+------------------------------------------+
+| ``empty_selector``             | text       | ``"text"`` indexes do not support        |
+|                                |            | queries with empty selectors.            |
++--------------------------------+------------+------------------------------------------+
+| ``excluded_by_user``           | any        | ``use_index`` was used to manually       |
+|                                |            | specify the index.                       |
++--------------------------------+------------+------------------------------------------+
+| ``field_mismatch``             | any        | Fields in ``"selector"`` of the query do |
+|                                |            | not match with the fields available in   |
+|                                |            | the index.                               |
++--------------------------------+------------+------------------------------------------+
+| ``is_partial``                 | json, text | Partial indexes can be selected only     |
+|                                |            | manually.                                |
++--------------------------------+------------+------------------------------------------+
+| ``less_overlap``               | json       | There is a better match of fields        |
+|                                |            | available within the indexes for the     |
+|                                |            | query.                                   |
++--------------------------------+------------+------------------------------------------+
+| ``needs_text_search``          | json       | The use of the ``$text`` operator        |
+|                                |            | requires a ``"text"`` index.             |
++--------------------------------+------------+------------------------------------------+
+| ``scope_mismatch``             | json       | The scope of the query and the index is  |
+|                                |            | not the same.                            |
++--------------------------------+------------+------------------------------------------+
+| ``sort_order_mismatch``        | json,      | Fields in ``"sort"`` of the query do not |
+|                                | special    | match with the fields available in the   |
+|                                |            | index.                                   |
++--------------------------------+------------+------------------------------------------+
+| ``too_many_fields``            | json       | The index has more fields than the       |
+|                                |            | chosen one.                              |
++--------------------------------+------------+------------------------------------------+
+| ``unfavored_type``             | any        | The type of the index is not preferred.  |
++--------------------------------+------------+------------------------------------------+
+
+In the :ref:`_explain <api/db/find/explain>` output, some additional
+information on the candidate indexes could be found too as part of the
+``analysis`` object.
+
+- The ``ranking`` (`number`) attribute defines a loose ordering on the
+  items of the list, which might be used to order them.  This is a
+  positive integer which is the greater the index is farther down in
+  the queue.  Virtually, the selected index is of rank ``0`` always,
+  everything else must come after that one.  The rank reflects the
+  final position of the given index candidate in the tournament
+  described above.
+
+- The ``usable`` (`Boolean`) attribute tells if the index is usable at
+  all.  This could be used to partition the index candidates by their
+  usability in relation to the selector.
+
+- The ``covering`` (`Boolean`) attribute tells if the index is a
+  covering index or not.  This property is calculated for ``"json"``
+  indexes only and it is ``null`` in every other case.

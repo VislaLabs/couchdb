@@ -31,32 +31,13 @@ defmodule CookieAuthTest do
   @password "3.141592653589"
 
   setup do
-    # Create db if not exists
-    Couch.put("/#{@users_db}")
-
-    retry_until(fn ->
-      resp =
-        Couch.get(
-          "/#{@users_db}/_changes",
-          query: [feed: "longpoll", timeout: 5000, filter: "_design"]
-        )
-        length(resp.body["results"]) > 0
-    end)
-
+    reset_db(@users_db)
+    wait_for_design_auth(@users_db)
     on_exit(&tear_down/0)
-
-    :ok
   end
 
   defp tear_down do
-    # delete users
-    user = URI.encode("org.couchdb.user:jchris")
-    user_doc = Couch.get("/#{@users_db}/#{URI.encode(user)}").body
-    Couch.delete("/#{@users_db}/#{user}", query: [rev: user_doc["_rev"]])
-
-    user = URI.encode("org.couchdb.user:Jason Davies")
-    user_doc = Couch.get("/#{@users_db}/#{user}").body
-    Couch.delete("/#{@users_db}/#{user}", query: [rev: user_doc["_rev"]])
+    reset_db(@users_db)
   end
 
   defp login(user, password) do
@@ -391,5 +372,47 @@ defmodule CookieAuthTest do
 
     # log in one last time so run_on_modified_server can clean up the admin account
     login("jan", "apple")
+  end
+
+  test "basic+cookie auth interaction" do
+    # performing a successful basic authentication will create a session cookie
+    resp = Couch.get(
+      "/_all_dbs",
+      no_auth: true,
+      headers: [authorization: "Basic #{:base64.encode("jan:apple")}"])
+    assert resp.status_code == 200
+
+    # extract cookie value
+    cookie = resp.headers[:"set-cookie"]
+    [token | _] = String.split(cookie, ";")
+
+    # Cookie is usable on its own
+    resp = Couch.get(
+      "/_session",
+      no_auth: true,
+      headers: [cookie: token])
+    assert resp.status_code == 200
+    assert resp.body["userCtx"]["name"]  == "jan"
+    assert resp.body["info"]["authenticated"] == "cookie"
+
+    # Cookie is usable with basic auth if usernames match
+    resp = Couch.get(
+      "/_session",
+      no_auth: true,
+      headers: [
+        authorization: "Basic #{:base64.encode("jan:apple")}",
+        cookie: token])
+    assert resp.status_code == 200
+    assert resp.body["userCtx"]["name"] == "jan"
+    assert resp.body["info"]["authenticated"] == "cookie"
+
+    # Cookie is not usable with basic auth if usernames don't match
+    resp = Couch.get(
+      "/_session",
+      no_auth: true,
+      headers: [
+        authorization: "Basic #{:base64.encode("notjan:banana")}",
+        cookie: token])
+    assert resp.status_code == 401
   end
 end

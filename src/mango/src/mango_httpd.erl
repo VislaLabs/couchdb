@@ -18,7 +18,6 @@
 
 -include_lib("couch/include/couch_db.hrl").
 -include("mango.hrl").
--include("mango_idx.hrl").
 -include("mango_execution_stats.hrl").
 
 -record(vacc, {
@@ -214,6 +213,11 @@ handle_find_req(#httpd{method = 'POST'} = Req, Db) ->
     case run_find(Resp0, Db, Sel, Opts) of
         {ok, AccOut} ->
             end_find_resp(AccOut);
+        {error, {{mango_error, Mod, Reason}, nil, [_ | _] = Stack}} ->
+            % Re-raise mango errors so we can deal with them at the top in
+            % handle_req/2, otherwise chttpd:error_info/1 doesn't know what do
+            % with them.
+            erlang:raise(throw, {mango_error, Mod, Reason}, Stack);
         {error, Error} ->
             chttpd:send_error(Req, Error)
     end;

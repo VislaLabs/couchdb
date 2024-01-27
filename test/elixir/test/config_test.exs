@@ -92,7 +92,7 @@ defmodule ConfigTest do
     assert Couch.login("administrator", plain_pass)
     hash_pass = get_config(context, "admins", "administrator")
 
-    assert Regex.match?(~r/^-pbkdf2-/, hash_pass) or
+    assert Regex.match?(~r/^-pbkdf2(:[a-z0-9]+)?-/, hash_pass) or
              Regex.match?(~r/^-hashed-/, hash_pass)
 
     delete_config(context, "admins", "administrator")
@@ -180,5 +180,17 @@ defmodule ConfigTest do
     resp = Couch.post(url)
 
     assert resp.status_code == 200
+  end
+
+  # Those are negative test cases.  The positive cases are implicitly
+  # tested by other ones.
+  test "Only JSON strings are accepted", context do
+    url = "#{context[:config_url]}/a/b"
+    values = ["true", "11", "{}", "{\"testing\": [1, 2, 3]}"]
+
+    Enum.each(values, fn value ->
+      resp = Couch.put(url, body: value)
+      assert resp.status_code == 400
+    end)
   end
 end

@@ -18,7 +18,6 @@
 
 -module(config).
 -behaviour(gen_server).
--vsn(1).
 
 -export([start_link/1, stop/0, reload/0]).
 
@@ -35,9 +34,8 @@
 
 -export([listen_for_changes/2]).
 -export([subscribe_for_changes/1]).
--export([parse_ini_file/1]).
 
--export([init/1, terminate/2, code_change/3]).
+-export([init/1]).
 -export([handle_call/3, handle_cast/2, handle_info/2]).
 
 -export([is_sensitive/2]).
@@ -48,10 +46,10 @@
 -define(INVALID_SECTION, <<"Invalid configuration section">>).
 -define(INVALID_KEY, <<"Invalid configuration key">>).
 -define(INVALID_VALUE, <<"Invalid configuration value">>).
--define(DELETE, delete).
+
+-include("config.hrl").
 
 -record(config, {
-    notify_funs = [],
     ini_files = undefined,
     write_filename = undefined
 }).
@@ -250,12 +248,11 @@ subscribe_for_changes(Subscription) ->
 init(IniFiles) ->
     enable_early_features(),
     ets:new(?MODULE, [named_table, set, protected, {read_concurrency, true}]),
-    lists:map(
-        fun(IniFile) ->
-            {ok, ParsedIniValues} = parse_ini_file(IniFile),
-            ets:insert(?MODULE, ParsedIniValues)
+    maps:foreach(
+        fun(K, V) ->
+            true = ets:insert(?MODULE, {K, V})
         end,
-        IniFiles
+        ini_map(IniFiles)
     ),
     WriteFile =
         case IniFiles of
@@ -265,43 +262,26 @@ init(IniFiles) ->
     debug_config(),
     {ok, #config{ini_files = IniFiles, write_filename = WriteFile}}.
 
-terminate(_Reason, _State) ->
-    ok.
-
 handle_call(all, _From, Config) ->
     Resp = lists:sort((ets:tab2list(?MODULE))),
     {reply, Resp, Config};
 handle_call({set, Sec, Key, Val, Opts}, _From, Config) ->
     Persist = maps:get(persist, Opts, true),
     Reason = maps:get(reason, Opts, nil),
-    IsSensitive = is_sensitive(Sec, Key),
+    LogVal = maybe_conceal(Val, is_sensitive(Sec, Key)),
     case validate_config_update(Sec, Key, Val) of
-        {error, ValidationError} when IsSensitive ->
-            couch_log:error(
-                "~p: [~s] ~s = '****' rejected for reason ~p",
-                [?MODULE, Sec, Key, Reason]
-            ),
-            {reply, {error, ValidationError}, Config};
         {error, ValidationError} ->
             couch_log:error(
-                "~p: [~s] ~s = '~s' rejected for reason ~p",
-                [?MODULE, Sec, Key, Val, Reason]
+                "~p: [~s] ~s = ~s rejected for reason ~p",
+                [?MODULE, Sec, Key, LogVal, Reason]
             ),
             {reply, {error, ValidationError}, Config};
         ok ->
             true = ets:insert(?MODULE, {{Sec, Key}, Val}),
-            case IsSensitive of
-                false ->
-                    couch_log:notice(
-                        "~p: [~s] ~s set to ~s for reason ~p",
-                        [?MODULE, Sec, Key, Val, Reason]
-                    );
-                true ->
-                    couch_log:notice(
-                        "~p: [~s] ~s set to '****' for reason ~p",
-                        [?MODULE, Sec, Key, Reason]
-                    )
-            end,
+            couch_log:notice(
+                "~p: [~s] ~s set to ~s for reason ~p",
+                [?MODULE, Sec, Key, LogVal, Reason]
+            ),
             ConfigWriteReturn =
                 case {Persist, Config#config.write_filename} of
                     {true, undefined} ->
@@ -331,10 +311,17 @@ handle_call({delete, Sec, Key, Persist, Reason}, _From, Config) ->
             {true, undefined} ->
                 ok;
             {true, FileName} ->
-                config_writer:save_to_file({{Sec, Key}, ""}, FileName);
+                config_writer:save_to_file({{Sec, Key}, ?DELETE}, FileName);
             _ ->
                 ok
         end,
+    IniMap = ini_map(Config#config.ini_files),
+    case maps:find({Sec, Key}, IniMap) of
+        {ok, Val} ->
+            true = ets:insert(?MODULE, {{Sec, Key}, Val});
+        _ ->
+            ok
+    end,
     case ConfigDeleteReturn of
         ok ->
             Event = {config_change, Sec, Key, deleted, Persist},
@@ -344,62 +331,39 @@ handle_call({delete, Sec, Key, Persist, Reason}, _From, Config) ->
             {reply, Else, Config}
     end;
 handle_call(reload, _From, Config) ->
-    DiskKVs = lists:foldl(
-        fun(IniFile, DiskKVs0) ->
-            {ok, ParsedIniValues} = parse_ini_file(IniFile),
-            lists:foldl(
-                fun({K, V}, DiskKVs1) ->
-                    dict:store(K, V, DiskKVs1)
-                end,
-                DiskKVs0,
-                ParsedIniValues
-            )
-        end,
-        dict:new(),
-        Config#config.ini_files
-    ),
-    % Update ets with anything we just read
-    % from disk
-    dict:fold(
-        fun({Sec, Key} = K, V, _) ->
+    % Update ets with ini values.
+    IniMap = ini_map(Config#config.ini_files),
+    maps:foreach(
+        fun({Sec, Key} = K, V) ->
             VExisting = get(Sec, Key, V),
-            ets:insert(?MODULE, {K, V}),
+            true = ets:insert(?MODULE, {K, V}),
             case V =:= VExisting of
                 true ->
                     ok;
                 false ->
-                    case is_sensitive(Sec, Key) of
-                        false ->
-                            couch_log:notice(
-                                "Reload detected config change ~s.~s = ~p",
-                                [Sec, Key, V]
-                            );
-                        true ->
-                            couch_log:notice(
-                                "Reload detected config change ~s.~s = '****'",
-                                [Sec, Key]
-                            )
-                    end,
+                    couch_log:notice(
+                        "Reload detected config change ~s.~s = ~p",
+                        [Sec, Key, maybe_conceal(V, is_sensitive(Sec, Key))]
+                    ),
                     Event = {config_change, Sec, Key, V, true},
                     gen_event:sync_notify(config_event, Event)
             end
         end,
-        nil,
-        DiskKVs
+        IniMap
     ),
-    % And remove anything in ets that wasn't
-    % on disk.
+    % And remove anything in ets that wasn't on disk.
     ets:foldl(
-        fun({{Sec, Key} = K, _}, _) ->
-            case dict:is_key(K, DiskKVs) of
-                true ->
-                    ok;
-                false ->
-                    couch_log:notice("Reload deleting in-memory config ~s.~s", [Sec, Key]),
-                    ets:delete(?MODULE, K),
-                    Event = {config_change, Sec, Key, deleted, true},
-                    gen_event:sync_notify(config_event, Event)
-            end
+        fun
+            ({{Sec, Key} = K, _}, _) when not is_map_key(K, IniMap) ->
+                couch_log:notice(
+                    "Reload deleting in-memory config ~s.~s",
+                    [Sec, Key]
+                ),
+                ets:delete(?MODULE, K),
+                Event = {config_change, Sec, Key, deleted, true},
+                gen_event:sync_notify(config_event, Event);
+            (_, _) ->
+                ok
         end,
         nil,
         ?MODULE
@@ -415,8 +379,10 @@ handle_info(Info, State) ->
     couch_log:error("config:handle_info Info: ~p~n", [Info]),
     {noreply, State}.
 
-code_change(_OldVsn, State, _Extra) ->
-    {ok, State}.
+maybe_conceal(Value, _IsSensitive = false) ->
+    Value;
+maybe_conceal(_, _IsSensitive = true) ->
+    "'****'".
 
 is_sensitive(Section, Key) ->
     Sensitive = application:get_env(config, sensitive, #{}),
@@ -426,10 +392,21 @@ is_sensitive(Section, Key) ->
         _ -> false
     end.
 
+ini_map(IniFiles) ->
+    lists:foldl(
+        fun(IniFile, IniMap0) ->
+            {ok, Props} = parse_ini_file(IniFile),
+            IniMap = maps:from_list(Props),
+            maps:merge(IniMap0, IniMap)
+        end,
+        #{},
+        IniFiles
+    ).
+
 parse_ini_file(IniFile) ->
     IniBin = read_ini_file(IniFile),
     ParsedIniValues = parse_ini(IniBin),
-    {ok, lists:filter(fun delete_keys/1, ParsedIniValues)}.
+    {ok, ParsedIniValues}.
 
 parse_ini(IniBin) when is_binary(IniBin) ->
     Lines0 = re:split(IniBin, "\r\n|\n|\r|\032", [{return, list}]),
@@ -458,10 +435,9 @@ parse_fold(Line, {Section, KVs}) ->
         [_] ->
             % Failed to split on " = ", so try to split on "=".
             % If the line starts with "=" or it's not a KV pair, ignore it.
-            % An empty value emit the `delete` atom as a marker.
             case string:split(Line, "=") of
                 ["", _] -> {Section, KVs};
-                [K, ""] -> {Section, [{{Section, trim(K)}, ?DELETE} | KVs]};
+                [_, ""] -> {Section, KVs};
                 [K, V] -> {Section, [{{Section, trim(K)}, trim(V)} | KVs]};
                 [_] -> {Section, KVs}
             end
@@ -490,14 +466,6 @@ remove_comments(Line) ->
             [NoComments | _] = re:split(NoLeadingComment, " ;|\t;", [{return, list}]),
             NoComments
     end.
-
-% Specially handle the ?DELETE marker
-%
-delete_keys({{Section, Key}, ?DELETE}) ->
-    ets:delete(?MODULE, {Section, Key}),
-    false;
-delete_keys({{_, _}, _}) ->
-    true.
 
 trim(String) ->
     % May look silly but we're using this quite a bit
@@ -692,17 +660,17 @@ parse_extra_equal_sign_test() ->
     ?assertEqual([{{"s", "==k=="}, "v"}], ini("[s]\n==k== = v")).
 
 parse_delete_test() ->
-    ?assertEqual([{{"s", "k"}, ?DELETE}], ini("[s]\nk=")),
-    ?assertEqual([{{"s", "k"}, ?DELETE}], ini("[s]\nk =")),
-    ?assertEqual([{{"s", "k"}, ?DELETE}], ini("[s]\nk = ")),
-    ?assertEqual([{{"s", "k"}, ?DELETE}], ini("[s]\nk= ")),
-    ?assertEqual([{{"s", "k"}, ?DELETE}], ini("[s]\nk = ")),
-    ?assertEqual([{{"s", "k"}, ?DELETE}], ini("[s]\nk = ;")),
-    ?assertEqual([{{"s", "k"}, ?DELETE}], ini("[s]\nk  =\t;")),
-    ?assertEqual([{{"s", "k"}, ?DELETE}], ini("[s]\nk=\n")),
-    ?assertEqual([{{"s", "k"}, ?DELETE}], ini("[s]\nk = ; ;")),
-    ?assertEqual([{{"s", "k"}, ?DELETE}], ini("[s]\nk = ;v")),
-    ?assertEqual([{{"s", "k"}, ?DELETE}], ini("[s]\nk = ;")).
+    ?assertEqual([], ini("[s]\nk=")),
+    ?assertEqual([], ini("[s]\nk =")),
+    ?assertEqual([], ini("[s]\nk = ")),
+    ?assertEqual([], ini("[s]\nk= ")),
+    ?assertEqual([], ini("[s]\nk = ")),
+    ?assertEqual([], ini("[s]\nk = ;")),
+    ?assertEqual([], ini("[s]\nk  =\t;")),
+    ?assertEqual([], ini("[s]\nk=\n")),
+    ?assertEqual([], ini("[s]\nk = ; ;")),
+    ?assertEqual([], ini("[s]\nk = ;v")),
+    ?assertEqual([], ini("[s]\nk = ;")).
 
 parse_comments_test() ->
     ?assertEqual([], ini("[s]\n;k=v")),
@@ -749,5 +717,17 @@ parse_multiple_kvs_test() ->
         ],
         ini("[s]\nk1=v1\ngarbage\n= more garbage\nk2=v2")
     ).
+
+read_non_existent_ini_file_test_() ->
+    {
+        setup,
+        fun() -> meck:expect(couch_log, error, fun(_, _) -> ok end) end,
+        fun(_) -> meck:unload() end,
+        [
+            ?_assertException(
+                throw, {startup_error, _}, read_ini_file("non-existent")
+            )
+        ]
+    }.
 
 -endif.

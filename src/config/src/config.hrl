@@ -10,6 +10,4 @@
 % License for the specific language governing permissions and limitations under
 % the License.
 
--define(REFRESH_INTERVAL, 5).
--define(PROMETHEUS_VERSION, "2.0").
-
+-define(DELETE, delete).

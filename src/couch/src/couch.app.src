@@ -33,10 +33,12 @@
         sasl,
         inets,
         ssl,
+        os_mon,
 
         % Upstream deps
         ibrowse,
         mochiweb,
+        fast_pbkdf2,
 
         % ASF deps
         couch_epi,

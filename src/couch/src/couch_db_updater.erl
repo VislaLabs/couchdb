@@ -12,10 +12,9 @@
 
 -module(couch_db_updater).
 -behaviour(gen_server).
--vsn(1).
 
 -export([add_sizes/3, upgrade_sizes/1]).
--export([init/1, terminate/2, handle_call/3, handle_cast/2, code_change/3, handle_info/2]).
+-export([init/1, terminate/2, handle_call/3, handle_cast/2, handle_info/2]).
 
 -include_lib("couch/include/couch_db.hrl").
 -include("couch_db_int.hrl").
@@ -251,9 +250,6 @@ handle_info(Msg, Db) ->
         Else ->
             Else
     end.
-
-code_change(_OldVsn, State, _Extra) ->
-    {ok, State}.
 
 sort_and_tag_grouped_docs(Client, GroupedDocs) ->
     % These groups should already be sorted but sometimes clients misbehave.

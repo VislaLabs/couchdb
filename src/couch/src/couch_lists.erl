@@ -10,5 +10,31 @@
 % License for the specific language governing permissions and limitations under
 % the License.
 
--define(DEFAULT_INTERVAL, 10).
--define(RELOAD_INTERVAL, 600).
+-module(couch_lists).
+
+-export([uniq/1]).
+
+%% uniq/1: return a new list with the unique elements of the given list
+
+-spec uniq(List1) -> List2 when
+    List1 :: [T],
+    List2 :: [T],
+    T :: term().
+
+-if((?OTP_RELEASE) >= 25).
+uniq(L) ->
+    lists:uniq(L).
+-else.
+uniq(L) ->
+    uniq_1(L, #{}).
+
+uniq_1([X | Xs], M) ->
+    case is_map_key(X, M) of
+        true ->
+            uniq_1(Xs, M);
+        false ->
+            [X | uniq_1(Xs, M#{X => true})]
+    end;
+uniq_1([], _) ->
+    [].
+-endif.

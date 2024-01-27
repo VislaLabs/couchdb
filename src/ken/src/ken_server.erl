@@ -14,9 +14,8 @@
 
 % gen_server boilerplate
 -behaviour(gen_server).
--vsn(1).
--export([init/1, terminate/2]).
--export([handle_call/3, handle_cast/2, handle_info/2, code_change/3]).
+-export([init/1]).
+-export([handle_call/3, handle_cast/2, handle_info/2]).
 
 % Public interface
 -export([start_link/0]).
@@ -115,9 +114,6 @@ init(_) ->
     ets:new(ken_resubmit, [named_table]),
     ets:new(ken_workers, [named_table, public, {keypos, #job.name}]),
     {ok, #state{pruned_last = erlang:monotonic_time()}}.
-
-terminate(_Reason, _State) ->
-    ok.
 
 handle_call({set_batch_size, BS}, _From, #state{batch_size = Old} = State) ->
     {reply, Old, State#state{batch_size = BS}, 0};
@@ -224,9 +220,6 @@ handle_info({'DOWN', _, _, Pid, Reason}, State) ->
 handle_info(Msg, State) ->
     {stop, {unknown_info, Msg}, State}.
 
-code_change(_OldVsn, State, _Extra) ->
-    {ok, State}.
-
 %% private functions
 
 maybe_start_next_queued_job(#state{dbworker = {_, _}} = State) ->
@@ -274,22 +267,26 @@ get_active_count() ->
 
 % If any indexing job fails, resubmit requests for all indexes.
 update_db_indexes(Name, State) ->
-    {ok, DDocs} = design_docs(Name),
-    RandomSorted = lists:sort([{rand:uniform(), D} || D <- DDocs]),
-    Resubmit = lists:foldl(
-        fun({_, DDoc}, Acc) ->
-            JsonDDoc = couch_doc:from_json_obj(DDoc),
-            case update_ddoc_indexes(Name, JsonDDoc, State) of
-                ok -> Acc;
-                _ -> true
-            end
-        end,
-        false,
-        RandomSorted
-    ),
-    if
-        Resubmit -> exit(resubmit);
-        true -> ok
+    case design_docs(Name) of
+        {ok, DDocs} ->
+            RandomSorted = lists:sort([{rand:uniform(), D} || D <- DDocs]),
+            Resubmit = lists:foldl(
+                fun({_, DDoc}, Acc) ->
+                    JsonDDoc = couch_doc:from_json_obj(DDoc),
+                    case update_ddoc_indexes(Name, JsonDDoc, State) of
+                        ok -> Acc;
+                        _ -> true
+                    end
+                end,
+                false,
+                RandomSorted
+            ),
+            if
+                Resubmit -> exit(resubmit);
+                true -> ok
+            end;
+        {error, timeout} ->
+            exit(resubmit)
     end.
 
 design_docs(Name) ->
@@ -487,11 +484,16 @@ should_start_job(#job{name = Name, seq = Seq, server = Pid}, State) ->
     IncrementalChannels = list_to_integer(config("incremental_channels", "80")),
     BatchChannels = list_to_integer(config("batch_channels", "20")),
     TotalChannels = IncrementalChannels + BatchChannels,
+    BlockBackgroundViewIndexing = couch_disk_monitor:block_background_view_indexing(),
+    % View name has two elements
+    IsView = tuple_size(Name) == 2,
     A = get_active_count(),
     #state{delay = Delay, batch_size = BS} = State,
     case ets:lookup(ken_workers, Name) of
         [] ->
             if
+                BlockBackgroundViewIndexing andalso IsView ->
+                    false;
                 A < BatchChannels ->
                     true;
                 A < TotalChannels ->
@@ -501,7 +503,7 @@ should_start_job(#job{name = Name, seq = Seq, server = Pid}, State) ->
                             {ok, CurrentSeq} = hastings_index:await(Pid, 0),
                             (Seq - CurrentSeq) < Threshold;
                         % View name has two elements.
-                        {_, _} ->
+                        _ when IsView ->
                             % Since seq is 0, couch_index:get_state/2 won't
                             % spawn an index update.
                             {ok, MRSt} = couch_index:get_state(Pid, 0),
@@ -525,6 +527,8 @@ should_start_job(#job{name = Name, seq = Seq, server = Pid}, State) ->
             Now = erlang:monotonic_time(),
             DeltaT = erlang:convert_time_unit(Now - LRU, native, millisecond),
             if
+                BlockBackgroundViewIndexing andalso IsView ->
+                    false;
                 A < BatchChannels, (Seq - OldSeq) >= BS ->
                     true;
                 A < BatchChannels, DeltaT > Delay ->

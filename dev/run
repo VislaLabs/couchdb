@@ -17,13 +17,16 @@ import base64
 import contextlib
 import functools
 import glob
+import hashlib
 import inspect
 import json
 import ntpath
 import optparse
 import os
+import platform
 import posixpath
 import re
+import shutil
 import signal
 import socket
 import subprocess as sp
@@ -37,15 +40,8 @@ from pbkdf2 import pbkdf2_hex
 
 COMMON_SALT = uuid.uuid4().hex
 
-try:
-    from urllib.request import urlopen
-except ImportError:
-    from urllib.request import urlopen
-
-try:
-    import http.client as httpclient
-except ImportError:
-    import http.client as httpclient
+from urllib.request import urlopen
+import http.client as httpclient
 
 
 def toposixpath(path):
@@ -88,12 +84,16 @@ log.verbose = True
 
 
 def main():
-    ctx = setup()
-    startup(ctx)
-    if ctx["cmd"]:
-        run_command(ctx, ctx["cmd"])
+    try:
+        ctx = setup()
+        startup(ctx)
+    except StartupError:
+        sys.exit(1)
     else:
-        join(ctx, cluster_port(ctx, 1), *ctx["admin"])
+        if ctx["cmd"]:
+            run_command(ctx, ctx["cmd"])
+        else:
+            join(ctx, cluster_port(ctx, 1), *ctx["admin"])
 
 
 def setup():
@@ -235,6 +235,25 @@ def get_args_parser():
         help="Start Nouveau server",
     )
     parser.add_option(
+        "--with-clouseau",
+        dest="with_clouseau",
+        default=False,
+        action="store_true",
+        help="Start Clouseau nodes",
+    )
+    parser.add_option(
+        "--erlang-cookie",
+        dest="erlang_cookie",
+        default=None,
+        help="Erlang cookie string",
+    )
+    parser.add_option(
+        "--clouseau-dir",
+        dest="clouseau_dir",
+        default=None,
+        help="Use a specific directory for finding Clouseau files",
+    ),
+    parser.add_option(
         "-t",
         "--enable-tls",
         dest="enable_tls",
@@ -251,12 +270,14 @@ def get_args_parser():
     return parser
 
 
+CLOUSEAU_DIR = "clouseau"
+
+
 def setup_context(opts, args):
     fpath = os.path.abspath(__file__)
     return {
         "N": opts.nodes,
         "no_join": opts.no_join,
-        "with_admin_party": opts.with_admin_party,
         "enable_erlang_views": opts.enable_erlang_views,
         "admin": opts.admin.split(":", 1) if opts.admin else None,
         "nodes": ["node%d" % (i + opts.node_number) for i in range(opts.nodes)],
@@ -278,6 +299,9 @@ def setup_context(opts, args):
         "auto_ports": opts.auto_ports,
         "locald_configs": opts.locald_configs,
         "with_nouveau": opts.with_nouveau,
+        "with_clouseau": opts.with_clouseau,
+        "clouseau_dir": opts.clouseau_dir or CLOUSEAU_DIR,
+        "erlang_cookie": opts.erlang_cookie,
         "enable_tls": opts.enable_tls,
         "no_tls": opts.no_tls,
     }
@@ -306,7 +330,12 @@ def check_boot_script(ctx):
     if not os.path.exists(os.path.join(ctx["devdir"], "devnode.boot")):
         env = os.environ.copy()
         env["ERL_LIBS"] = os.path.join(ctx["rootdir"], "src")
-        sp.check_call(["escript", "make_boot_script"], env=env, cwd=ctx["devdir"])
+        try:
+            sp.check_call(["escript", "make_boot_script"], env=env, cwd=ctx["devdir"])
+        except sp.CalledProcessError:
+            raise StartupError(
+                "Boot script could not be created.  Perhaps you forgot to run `make`?"
+            )
 
 
 @log("Prepare configuration files")
@@ -333,12 +362,14 @@ def setup_configs(ctx):
             "backend_port": backend_port,
             "prometheus_port": prometheus_port,
             "uuid": "fake_uuid_for_dev",
-            "with_nouveau": str(ctx["with_nouveau"]).lower(),
+            "nouveau_enable": str(ctx["with_nouveau"]).lower(),
+            "nouveau_url": "http://127.0.0.1:5987",
             "_default": "",
         }
         write_config(ctx, node, env)
         write_locald_configs(ctx, node, env)
     generate_haproxy_config(ctx)
+    generate_nouveau_config(ctx)
 
 
 def write_locald_configs(ctx, node, env):
@@ -379,6 +410,28 @@ def generate_haproxy_config(ctx):
     with open(haproxy_config, "w") as handle:
         handle.write("\n".join(out))
         handle.write("\n")
+
+
+def generate_nouveau_config(ctx):
+    if not ctx["with_nouveau"]:
+        return
+    src = os.path.join(ctx["rootdir"], "rel", "nouveau.yaml")
+    tgt = os.path.join(ctx["devdir"], "lib", "nouveau.yaml")
+
+    config = {
+        "nouveau_index_dir": os.path.join(ctx["devdir"], "lib", "nouveau"),
+        "nouveau_port": 5987,
+        "nouveau_admin_port": 5988,
+    }
+
+    with open(src) as handle:
+        content = handle.read()
+
+    for key in config:
+        content = re.sub("{{%s}}" % key, str(config[key]), content)
+
+    with open(tgt, "w") as handle:
+        handle.write(content)
 
 
 def apply_config_overrides(ctx, content):
@@ -477,39 +530,271 @@ def boot_haproxy(ctx):
     env = os.environ.copy()
     if "HAPROXY_PORT" not in env:
         env["HAPROXY_PORT"] = ctx["haproxy_port"]
-    return sp.Popen(
-        " ".join(cmd), shell=True, stdin=sp.PIPE, stdout=log, stderr=sp.STDOUT, env=env
-    )
+    return sp.Popen(cmd, stdin=sp.PIPE, stdout=log, stderr=sp.STDOUT, env=env)
+
+
+def maybe_boot_nouveau(ctx):
+    if ctx["with_nouveau"]:
+        return boot_nouveau(ctx)
 
 
 def boot_nouveau(ctx):
-    if not ctx["with_nouveau"]:
-        return
-
-    version = "1.0-SNAPSHOT"
+    config = os.path.join(ctx["devdir"], "lib", "nouveau.yaml")
     cmd = [
-        "java",
-        "-server",
-        "-jar",
-        "build/libs/server-%s-dist.jar" % version,
-        "server",
-        "nouveau.yaml",
+        "./gradlew",
+        "run",
+        "--args",
+        "server {}".format(config),
     ]
     logfname = os.path.join(ctx["devdir"], "logs", "nouveau.log")
     log = open(logfname, "w")
     return sp.Popen(
-        " ".join(cmd),
+        cmd,
         cwd="nouveau",
-        shell=True,
         stdin=sp.PIPE,
         stdout=log,
         stderr=sp.STDOUT,
     )
 
 
+JAVA_VERSION_RE = re.compile(r'"(\d+\.\d+).*"')
+
+
+def get_java_version(java):
+    try:
+        output = sp.check_output([java, "-version"], stderr=sp.STDOUT).decode("utf-8")
+    except:
+        output = None
+
+    if output:
+        matches = JAVA_VERSION_RE.search(output)
+        if matches:
+            return float(matches.groups()[0])
+
+
+class StartupError(Exception):
+    def __init__(self, message):
+        self.message = message
+        super().__init__(self.message)
+
+
+def generate_default_clouseau_ini(path):
+    print("(generate default clouseau.ini)")
+    with open(path, "w") as handle:
+        handle.write(
+            """[clouseau]
+"""
+        )
+
+
+def generate_default_log4j_properties(path):
+    print("(generate default log4j.properties)")
+    with open(path, "w") as handle:
+        handle.write(
+            """log4j.rootLogger=debug, CONSOLE
+log4j.appender.CONSOLE=org.apache.log4j.ConsoleAppender
+log4j.appender.CONSOLE.layout=org.apache.log4j.PatternLayout
+log4j.appender.CONSOLE.layout.ConversionPattern=%d{ISO8601} %c [%p] %m%n
+"""
+        )
+
+
+@log("Start Clouseau node clouseau{idx}")
+def boot_clouseau(ctx, idx):
+    configure_cmd = (
+        "&.\\configure.ps1 -EnableClouseau"
+        if platform.system() == "Windows"
+        else "./configure --enable-clouseau"
+    )
+    clouseau_dir = ctx["clouseau_dir"]
+
+    if not os.path.isdir(clouseau_dir):
+        raise StartupError(
+            (
+                "Clouseau files cannot be found.  "
+                "Please run `{}` or make `--clouseau-dir` point to a valid directory"
+            ).format(configure_cmd)
+        )
+
+    clouseau_java_home = os.environ.get("CLOUSEAU_JAVA_HOME") or os.environ.get(
+        "JAVA_HOME"
+    )
+    java = (
+        clouseau_java_home + "/bin/java" if clouseau_java_home else shutil.which("java")
+    )
+    java_version = get_java_version(java)
+
+    pom_file = os.path.join(clouseau_dir, "pom.xml")
+    method = "src" if os.path.isfile(pom_file) else "dist"
+
+    if not java_version:
+        print(
+            "Warning: Java version could not be determined, Clouseau may not be able to run"
+        )
+    else:
+        if method == "src" and (java_version < 1.7 or 1.7 < java_version):
+            raise StartupError(
+                "Java is not suitable to run Clouseau.  Please use JDK 1.7 and configure its (root) path in `CLOUSEAU_JAVA_HOME`"
+            )
+        elif java_version < 1.7 or 1.8 < java_version:
+            raise StartupError(
+                "Java is not suitable to run Clouseau.  Please use JRE 1.7 or 1.8 and configure its (root) path in `CLOUSEAU_JAVA_HOME`"
+            )
+
+    logfname = os.path.join(ctx["devdir"], "logs", "clouseau{}.log".format(idx))
+    log = open(logfname, "w")
+    separator = ";" if platform.system() == "Windows" else ":"
+
+    if method == "src":
+        target_dir = os.path.join(clouseau_dir, "target")
+        cp_file = os.path.join(ctx["devdir"], "lib", "clouseau.classpath")
+
+        # attempt building the sources only once
+        if idx == 1:
+            env = os.environ.copy()
+            if clouseau_java_home:
+                env["JAVA_HOME"] = clouseau_java_home
+
+            clouseau_mvn_home = os.environ.get("CLOUSEAU_M2_HOME") or os.environ.get(
+                "M2_HOME"
+            )
+            mvn = (
+                clouseau_mvn_home + "/bin/mvn"
+                if clouseau_mvn_home
+                else shutil.which("mvn")
+            )
+
+            if not mvn:
+                raise StartupError(
+                    "Maven could not be found.  Please install Maven 3.8 and configure its (root) path in `CLOUSEAU_M2_HOME`"
+                )
+
+            try:
+                sp.check_call(
+                    [
+                        mvn,
+                        "-B",
+                        "compile",
+                        "dependency:build-classpath",
+                        "-Dmdep.outputFile={}".format(cp_file),
+                    ],
+                    cwd=clouseau_dir,
+                    env=env,
+                    stdin=sp.PIPE,
+                    stdout=log,
+                    stderr=log,
+                )
+            except Exception as exc:
+                log.write(str(exc))
+                raise StartupError("Could not build Clouseau from sources.")
+
+        with open(cp_file, "r") as handle:
+            classpath_deps = handle.read().rstrip()
+
+        targets = os.path.join(clouseau_dir, "target", "classes")
+        classpath = separator.join([classpath_deps, targets])
+    else:
+        clouseau_jars = [
+            os.path.join(clouseau_dir, fname)
+            for fname in os.listdir(clouseau_dir)
+            if fname.endswith(".jar")
+        ]
+
+        if not clouseau_jars:
+            raise StartupError("Clouseau has no JAR files")
+
+        classpath = separator.join(clouseau_jars)
+
+    clouseau_ini = os.path.join(clouseau_dir, "clouseau.ini")
+    if not os.path.exists(clouseau_ini):
+        generate_default_clouseau_ini(clouseau_ini)
+
+    log4j_properties = os.path.join(clouseau_dir, "log4j.properties")
+    if not os.path.exists(log4j_properties):
+        generate_default_log4j_properties(log4j_properties)
+
+    clouseau_name = "clouseau{}@127.0.0.1".format(idx)
+    clouseau_indexes_dir = os.path.join(ctx["devdir"], "clouseau{}".format(idx), "data")
+
+    if ctx["erlang_cookie"]:
+        clouseau_cookie = ["-Dclouseau.cookie={}".format(ctx["erlang_cookie"])]
+    else:
+        clouseau_cookie = []
+
+    # `HOME` must be set for Scalang to find the Erlang cookie
+    if not os.environ.get("HOME"):
+        # This is usually `USERPROFILE` on Windows
+        alternativeHome = os.environ.get("USERPROFILE")
+        if alternativeHome:
+            os.environ["HOME"] = alternativeHome
+
+    cmd = (
+        [
+            java,
+            "-server",
+            "-Xmx2G",
+            "-Dsun.net.inetaddr.ttl=30",
+            "-Dsun.net.inetaddr.negative.ttl=30",
+            '-XX:OnOutOfMemoryError="kill -9 %p"',
+            "-XX:+UseConcMarkSweepGC",
+            "-XX:+CMSParallelRemarkEnabled",
+            "-cp",
+            classpath,
+            "-Dlog4j.configuration=file:{}".format(log4j_properties),
+            "-Dclouseau.name={}".format(clouseau_name),
+            "-Dclouseau.dir={}".format(clouseau_indexes_dir),
+        ]
+        + clouseau_cookie
+        + [
+            "com.cloudant.clouseau.Main",
+            clouseau_ini,
+        ]
+    )
+
+    try:
+        return sp.Popen(
+            cmd,
+            stdin=sp.PIPE,
+            stdout=log,
+            stderr=sp.STDOUT,
+        )
+    except:
+        raise StartupError("Java is not capable of running Clouseau")
+
+
+def maybe_boot_clouseau(ctx, idx):
+    if ctx["with_clouseau"]:
+        return boot_clouseau(ctx, idx)
+
+
+@log("Check Clouseau node clouseau{idx}")
+def check_clouseau_node_alive(ctx, idx):
+    if ctx["erlang_cookie"]:
+        cookie = ["-c", ctx["erlang_cookie"]]
+    else:
+        cookie = []
+
+    cmd = (
+        ["erl_call", "-n", "node{}@127.0.0.1".format(idx)]
+        + cookie
+        + [
+            "-a",
+            "net_adm ping ['clouseau{}@127.0.0.1']".format(idx),
+        ]
+    )
+
+    if sp.check_output(cmd) != b"pong":
+        raise ValueError("Clouseau is not working")
+
+
+def maybe_check_clouseau_node_alive(ctx, idx):
+    if ctx["with_clouseau"]:
+        check_clouseau_node_alive(ctx, idx)
+
+
 def hack_default_ini(ctx, node, contents):
     contents = re.sub(
-        "^\[httpd\]$",
+        r"^\[httpd\]$",
         "[httpd]\nenable = true",
         contents,
         flags=re.MULTILINE,
@@ -517,7 +802,7 @@ def hack_default_ini(ctx, node, contents):
 
     if ctx["enable_erlang_views"]:
         contents = re.sub(
-            "^\[native_query_servers\]$",
+            r"^\[native_query_servers\]$",
             "[native_query_servers]\nerlang = {couch_native_process, start_link, []}",
             contents,
             flags=re.MULTILINE,
@@ -527,19 +812,15 @@ def hack_default_ini(ctx, node, contents):
 
 
 def hack_local_ini(ctx, contents):
-    if ctx["with_admin_party"]:
-        os.environ["COUCHDB_TEST_ADMIN_PARTY_OVERRIDE"] = "1"
-        ctx["admin"] = ("Admin Party!", "You do not need any password.")
-        return contents + "\n\n[chttpd_auth]\nsecret = %s\n" % COMMON_SALT
-
     # handle admin credentials passed from cli or generate own one
     if ctx["admin"] is None:
         ctx["admin"] = user, pswd = "root", gen_password()
     else:
         user, pswd = ctx["admin"]
 
-    # this relies on [admin] being the last section at the end of the file
-    contents = contents + "\n%s = %s" % (user, hashify(pswd))
+    contents = contents.replace(
+        "\n[admins]\n", "\n[admins]\n%s = %s\n" % (user, hashify(pswd))
+    )
 
     return contents + "\n\n[chttpd_auth]\nsecret = %s\n" % COMMON_SALT
 
@@ -563,7 +844,7 @@ def gen_password():
     return base64.b64encode(os.urandom(6)).decode()
 
 
-def hashify(pwd, salt=COMMON_SALT, iterations=10, keylen=20):
+def hashify(pwd, salt=COMMON_SALT, iterations=10, keylen=32):
     """
     Implements password hashing according to:
       - https://issues.apache.org/jira/browse/COUCHDB-1060
@@ -574,8 +855,8 @@ def hashify(pwd, salt=COMMON_SALT, iterations=10, keylen=20):
     >>> hashify(candeira)
     -pbkdf2-99eb34d97cdaa581e6ba7b5386e112c265c5c670,d1d2d4d8909c82c81b6c8184429a0739,10
     """
-    derived_key = pbkdf2_hex(pwd, salt, iterations, keylen)
-    return "-pbkdf2-%s,%s,%s" % (derived_key, salt, iterations)
+    derived_key = pbkdf2_hex(pwd, salt, iterations, keylen, hashfunc=hashlib.sha256)
+    return "-pbkdf2:sha256-%s,%s,%s" % (derived_key, salt, iterations)
 
 
 def startup(ctx):
@@ -589,10 +870,7 @@ def startup(ctx):
     ensure_all_nodes_alive(ctx)
     if ctx["no_join"]:
         return
-    if ctx["with_admin_party"]:
-        cluster_setup_with_admin_party(ctx)
-    else:
-        cluster_setup(ctx)
+    cluster_setup(ctx)
     if ctx["degrade_cluster"] > 0:
         degrade_cluster(ctx)
 
@@ -627,9 +905,13 @@ def boot_nodes(ctx):
     haproxy_proc = boot_haproxy(ctx)
     if haproxy_proc is not None:
         ctx["procs"].append(haproxy_proc)
-    nouveau_proc = boot_nouveau(ctx)
+    nouveau_proc = maybe_boot_nouveau(ctx)
     if nouveau_proc is not None:
         ctx["procs"].append(nouveau_proc)
+    for idx in [(i + ctx["node_number"]) for i in range(ctx["N"])]:
+        clouseau_proc = maybe_boot_clouseau(ctx, idx)
+        if clouseau_proc is not None:
+            ctx["procs"].append(clouseau_proc)
 
 
 def ensure_all_nodes_alive(ctx):
@@ -642,6 +924,7 @@ def ensure_all_nodes_alive(ctx):
             url = "http://127.0.0.1:{0}/".format(local_port)
             try:
                 check_node_alive(url)
+                maybe_check_clouseau_node_alive(ctx, num + 1)
             except:
                 pass
             else:
@@ -747,149 +1030,139 @@ def cluster_setup(ctx):
 
 
 def enable_cluster(node_count, port, user, pswd):
-    conn = httpclient.HTTPConnection("127.0.0.1", port)
-    conn.request(
+    body = json.dumps(
+        {
+            "action": "enable_cluster",
+            "bind_address": "0.0.0.0",
+            "username": user,
+            "password": pswd,
+            "node_count": node_count,
+        }
+    )
+    (status, response) = try_request(
+        "127.0.0.1",
+        port,
         "POST",
         "/_cluster_setup",
-        json.dumps(
-            {
-                "action": "enable_cluster",
-                "bind_address": "0.0.0.0",
-                "username": user,
-                "password": pswd,
-                "node_count": node_count,
-            }
-        ),
-        {
-            "Authorization": basic_auth_header(user, pswd),
-            "Content-Type": "application/json",
-        },
+        (201, 400),
+        body=body,
+        headers=setup_headers(user, pswd),
+        error="Failed to run _cluster_setup",
     )
-    resp = conn.getresponse()
-    if resp.status == 400:
-        resp.close()
+    if status == 400:
         return False
-    assert resp.status == 201, resp.read()
-    resp.close()
+    assert status == 201, response
     return True
 
 
 def add_node(lead_port, node_name, node_port, user, pswd):
-    conn = httpclient.HTTPConnection("127.0.0.1", lead_port)
-    conn.request(
+    body = json.dumps(
+        {
+            "action": "add_node",
+            "host": "127.0.0.1",
+            "port": node_port,
+            "name": node_name,
+            "username": user,
+            "password": pswd,
+        }
+    )
+    (status, response) = try_request(
+        "127.0.0.1",
+        lead_port,
         "POST",
         "/_cluster_setup",
-        json.dumps(
-            {
-                "action": "add_node",
-                "host": "127.0.0.1",
-                "port": node_port,
-                "name": node_name,
-                "username": user,
-                "password": pswd,
-            }
-        ),
-        {
-            "Authorization": basic_auth_header(user, pswd),
-            "Content-Type": "application/json",
-        },
+        (201, 409),
+        body=body,
+        headers=setup_headers(user, pswd),
     )
-    resp = conn.getresponse()
-    assert resp.status in (201, 409), resp.read()
-    resp.close()
+    assert status in (201, 409), response
 
 
 def set_cookie(port, user, pswd):
-    conn = httpclient.HTTPConnection("127.0.0.1", port)
-    conn.request(
+    (status, response) = try_request(
+        "127.0.0.1",
+        port,
         "POST",
         "/_cluster_setup",
-        json.dumps({"action": "receive_cookie", "cookie": generate_cookie()}),
-        {
-            "Authorization": basic_auth_header(user, pswd),
-            "Content-Type": "application/json",
-        },
+        (201,),
+        body=json.dumps({"action": "receive_cookie", "cookie": generate_cookie()}),
+        headers=setup_headers(user, pswd),
     )
-    resp = conn.getresponse()
-    assert resp.status == 201, resp.read()
-    resp.close()
+    assert status == 201, response
 
 
 def finish_cluster(port, user, pswd):
-    conn = httpclient.HTTPConnection("127.0.0.1", port)
-    conn.request(
+    (status, response) = try_request(
+        "127.0.0.1",
+        port,
         "POST",
         "/_cluster_setup",
-        json.dumps({"action": "finish_cluster"}),
-        {
-            "Authorization": basic_auth_header(user, pswd),
-            "Content-Type": "application/json",
-        },
+        (201, 400),
+        body=json.dumps({"action": "finish_cluster"}),
+        headers=setup_headers(user, pswd),
+        error="Failed to run _finish_cluster",
     )
-    resp = conn.getresponse()
-    # 400 for already set up'ed cluster
-    assert resp.status in (201, 400), resp.read()
-    resp.close()
+    # 400 for already set up cluster
+    assert status in (201, 400), response
 
 
-def basic_auth_header(user, pswd):
-    return "Basic " + base64.b64encode((user + ":" + pswd).encode()).decode()
+def setup_headers(user, pswd):
+    b64userpass = base64.b64encode((user + ":" + pswd).encode()).decode()
+    return {
+        "Authorization": "Basic " + b64userpass,
+        "Content-Type": "application/json",
+    }
 
 
 def generate_cookie():
     return base64.b64encode(os.urandom(12)).decode()
 
 
-def cluster_setup_with_admin_party(ctx):
-    connect_nodes(ctx)
-    host, port = "127.0.0.1", cluster_port(ctx, 1)
-    create_system_databases(host, port)
-
-
-def connect_nodes(ctx):
-    host, port = "127.0.0.1", backend_port(ctx, 1)
-    for node in ctx["nodes"]:
-        path = "/_nodes/%s@127.0.0.1" % node
-        try_request(
-            host,
-            port,
-            "PUT",
-            path,
-            (200, 201, 202, 409),
-            body="{}",
-            error="Failed to join %s into cluster:\n" % node,
-        )
-
-
 def try_request(
-    host, port, meth, path, success_codes, body=None, retries=10, retry_dt=1, error=""
+    host,
+    port,
+    meth,
+    path,
+    success_codes,
+    body=None,
+    headers=None,
+    retries=10,
+    retry_dt=1,
+    error="",
 ):
     while True:
         conn = httpclient.HTTPConnection(host, port)
-        conn.request(meth, path, body=body)
-        resp = conn.getresponse()
-        if resp.status in success_codes:
-            return resp.status, resp.read()
-        elif retries <= 0:
-            assert resp.status in success_codes, "%s%s" % (error, resp.read())
+        try:
+            if headers is not None:
+                conn.request(meth, path, body=body, headers=headers)
+            else:
+                conn.request(meth, path, body=body)
+            resp = conn.getresponse()
+            if resp.status in success_codes:
+                result = (resp.status, resp.read())
+                resp.close()
+                return result
+            elif retries <= 0:
+                assert resp.status in success_codes, "%s%s" % (error, resp.read())
+        except Exception as e:
+            if retries <= 0:
+                print("Connection failed %s %s" % (e, error))
+                raise e
+            print("Retrying ... %s " % e)
         retries -= 1
         time.sleep(retry_dt)
 
 
 def create_system_databases(host, port):
     for dbname in ["_users", "_replicator", "_global_changes"]:
-        conn = httpclient.HTTPConnection(host, port)
-        conn.request("HEAD", "/" + dbname)
-        resp = conn.getresponse()
-        if resp.status == 404:
-            try_request(
-                host,
-                port,
-                "PUT",
-                "/" + dbname,
-                (201, 202, 412),
-                error="Failed to create '%s' database:\n" % dbname,
-            )
+        try_request(
+            host,
+            port,
+            "PUT",
+            "/" + dbname,
+            (201, 202, 412),
+            error="Failed to create '%s' database:\n" % dbname,
+        )
 
 
 @log(

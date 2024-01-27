@@ -20,11 +20,9 @@
 
 -export([
     init/1,
-    terminate/2,
     handle_call/3,
     handle_info/2,
-    handle_cast/2,
-    code_change/3
+    handle_cast/2
 ]).
 
 -export([
@@ -59,9 +57,6 @@ init([]) ->
             {ok, State}
     end.
 
-terminate(_Reason, _State) ->
-    ok.
-
 handle_call(_Msg, _From, State) ->
     {reply, {error, invalid_call}, State}.
 
@@ -73,14 +68,13 @@ handle_cast({cluster, stable}, State) ->
 handle_info(_Msg, State) ->
     {noreply, State}.
 
-code_change(_OldVsn, State, _Extra) ->
-    {ok, State}.
-
 -spec restart_mdb_changes(#state{}) -> #state{}.
 restart_mdb_changes(#state{mdb_changes = nil} = State) ->
     Suffix = <<"_replicator">>,
     CallbackMod = couch_replicator_doc_processor,
-    Options = [skip_ddocs],
+    Interval = couch_replicator_scheduler:get_interval_msec(),
+    Options = [skip_ddocs, {shards_db_check_msec, Interval div 2}],
+
     {ok, Pid} = couch_multidb_changes:start_link(
         Suffix,
         CallbackMod,

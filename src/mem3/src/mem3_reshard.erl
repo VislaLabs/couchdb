@@ -44,8 +44,7 @@
     terminate/2,
     handle_call/3,
     handle_cast/2,
-    handle_info/2,
-    code_change/3
+    handle_info/2
 ]).
 
 -include("mem3_reshard.hrl").
@@ -266,7 +265,7 @@ handle_call({resume_job, _}, _From, #state{state = stopped} = State) ->
 handle_call({resume_job, Id}, _From, State) ->
     couch_log:notice("~p resume_job call ~p", [?MODULE, Id]),
     case job_by_id(Id) of
-        #job{job_state = stopped} = Job ->
+        #job{job_state = JobState} = Job when JobState == stopped; JobState == failed ->
             case start_job_int(Job, State) of
                 ok ->
                     {reply, ok, State};
@@ -355,9 +354,6 @@ handle_info({'DOWN', _Ref, process, Pid, Info}, State) ->
 handle_info(Info, State) ->
     couch_log:error("~p unexpected info ~p", [?MODULE, Info]),
     {noreply, State}.
-
-code_change(_OldVsn, State, _Extra) ->
-    {ok, State}.
 
 %% Private API
 

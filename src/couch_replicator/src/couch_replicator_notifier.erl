@@ -13,13 +13,12 @@
 -module(couch_replicator_notifier).
 
 -behaviour(gen_event).
--vsn(1).
 
 % public API
 -export([start_link/1, stop/1, notify/1]).
 
 % gen_event callbacks
--export([init/1, terminate/2, code_change/3]).
+-export([init/1]).
 -export([handle_event/2, handle_call/2, handle_info/2]).
 
 -include_lib("couch/include/couch_db.hrl").
@@ -40,9 +39,6 @@ stop(Pid) ->
 init(FunAcc) ->
     {ok, FunAcc}.
 
-terminate(_Reason, _State) ->
-    ok.
-
 handle_event(Event, Fun) when is_function(Fun, 1) ->
     Fun(Event),
     {ok, Fun};
@@ -54,7 +50,4 @@ handle_call(_Msg, State) ->
     {ok, ok, State}.
 
 handle_info(_Msg, State) ->
-    {ok, State}.
-
-code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
