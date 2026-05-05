@@ -44,6 +44,7 @@
 
 -include_lib("mem3/include/mem3.hrl").
 -include_lib("couch/include/couch_db.hrl").
+-include_lib("kernel/include/file.hrl").
 
 -record(state, {
     active = [],
@@ -105,19 +106,21 @@ handle_call(get_backlog, _From, #state{active = A, waiting = WQ} = State) ->
 
 handle_cast({push, DbName, Node}, State) ->
     handle_cast({push, #job{name = DbName, node = Node}}, State);
-handle_cast({push, Job}, #state{count = Count, limit = Limit} = State) when
-    Count >= Limit
-->
-    {noreply, add_to_queue(State, Job)};
-handle_cast({push, Job}, State) ->
-    #state{active = L, count = C} = State,
-    #job{name = DbName, node = Node} = Job,
-    case is_running(DbName, Node, L) of
+handle_cast({push, #job{name = DbName} = Job}, State) ->
+    case is_dormant_peruser_shard(DbName) of
         true ->
-            {noreply, add_to_queue(State, Job)};
+            % Skip dormant peruser shards: their .couch file has not been
+            % touched on disk for [mem3] active_peruser_age_days days. This
+            % bounds mem3_sync work by the active working set and prevents
+            % binary_alloc carrier fragmentation OOM on cold start when there
+            % are O(100k) per-user databases.
+            couch_log:debug(
+                "mem3_sync: skipping dormant peruser shard ~s",
+                [DbName]
+            ),
+            {noreply, State};
         false ->
-            Pid = start_push_replication(Job),
-            {noreply, State#state{active = [Job#job{pid = Pid} | L], count = C + 1}}
+            handle_push(Job, State)
     end;
 handle_cast({remove_node, Node}, #state{waiting = W0} = State) ->
     {Alive, Dead} = lists:partition(fun(#job{node = N}) -> N =/= Node end, to_list(W0)),
@@ -142,6 +145,19 @@ handle_cast({remove_shard, Shard}, #state{waiting = W0} = State) ->
         S =:= Shard
     ],
     {noreply, State#state{dict = Dict, waiting = from_list(Alive)}}.
+
+handle_push(Job, #state{count = Count, limit = Limit} = State) when Count >= Limit ->
+    {noreply, add_to_queue(State, Job)};
+handle_push(Job, State) ->
+    #state{active = L, count = C} = State,
+    #job{name = DbName, node = Node} = Job,
+    case is_running(DbName, Node, L) of
+        true ->
+            {noreply, add_to_queue(State, Job)};
+        false ->
+            Pid = start_push_replication(Job),
+            {noreply, State#state{active = [Job#job{pid = Pid} | L], count = C + 1}}
+    end.
 
 handle_info({'EXIT', Active, normal}, State) ->
     handle_replication_exit(State, Active);
@@ -285,7 +301,23 @@ initial_sync_fold(#shard{dbname = Db} = Shard, {LocalNode, Live, AccShards}) ->
 
 submit_replication_tasks(LocalNode, Live, Shards) ->
     SplitFun = fun(#shard{node = Node}) -> Node =:= LocalNode end,
-    {Local, Remote} = lists:partition(SplitFun, Shards),
+    {Local0, Remote} = lists:partition(SplitFun, Shards),
+    %% Drop dormant peruser shards (braid-<id> whose .couch file has not been
+    %% touched on disk for [mem3] active_peruser_age_days days, default 7).
+    %% This bounds initial_sync work by the active working set rather than the
+    %% total per-user shard count, eliminating binary_alloc carrier
+    %% fragmentation that OOMs the BEAM at startup on hubs with O(100k)
+    %% per-user databases.
+    Local = filter_dormant_peruser_shards(Local0),
+    case length(Local0) - length(Local) of
+        0 ->
+            ok;
+        Skipped ->
+            couch_log:notice(
+                "mem3_sync: skipped ~b dormant peruser shards in initial_sync",
+                [Skipped]
+            )
+    end,
     lists:foreach(
         fun(#shard{name = ShardName}) ->
             [
@@ -364,3 +396,214 @@ maybe_redirect(Node) ->
             couch_log:debug("Redirecting push from ~p to ~p", [Node, Redirect]),
             list_to_existing_atom(Redirect)
     end.
+
+%% =============================================================================
+%% Dormant peruser shard filtering
+%% =============================================================================
+%%
+%% Per-user databases (couch_peruser, name pattern <<"braid-<id>">>) accumulate
+%% to O(100k+) on long-lived hubs. On every cdb cold start, mem3_sync walks
+%% q*n*PeruserCount shard pairs through the replication queue. Even when the
+%% queue is bounded by sync_concurrency, each candidate triggers a refc-binary
+%% allocation for the shard name and metadata. Those binaries fragment
+%% binary_alloc carriers that BEAM never returns to the OS, which OOMs the
+%% process at ~80GB while erlang:memory/0 reports a few hundred MB.
+%%
+%% The fix here bounds mem3_sync work to the *active* peruser working set:
+%% any peruser shard whose .couch file has not been touched on disk for
+%% [mem3] active_peruser_age_days days is skipped at enqueue time. Non-peruser
+%% shards (_users, _dbs, _nodes, regular sharded DBs) are NEVER skipped.
+%% On stat error, the shard is KEPT (conservative — never silently lose work).
+
+-define(PERUSER_PREFIX, <<"braid-">>).
+-define(DEFAULT_ACTIVE_AGE_DAYS, 7).
+
+%% @doc Filter a list of #shard{} records, dropping peruser shards whose
+%% on-disk .couch file mtime is older than the configured active age.
+-spec filter_dormant_peruser_shards([#shard{}]) -> [#shard{}].
+filter_dormant_peruser_shards(Shards) ->
+    AgeDays = active_peruser_age_days(),
+    case AgeDays of
+        0 ->
+            %% 0 disables the filter entirely. Useful for emergency rollback
+            %% via runtime config without redeploying.
+            Shards;
+        _ ->
+            CutoffSecs = erlang:system_time(second) - (AgeDays * 86400),
+            [S || S <- Shards, not is_dormant_peruser_shard_record(S, CutoffSecs)]
+    end.
+
+%% @doc True if the shard name belongs to a peruser db AND its .couch file
+%% mtime is older than the active cutoff. This is the variant used on the
+%% push/cast path where we have a shard-name binary, not the #shard{} record.
+-spec is_dormant_peruser_shard(binary() | string() | atom()) -> boolean().
+is_dormant_peruser_shard(ShardName) when is_binary(ShardName) ->
+    case is_peruser_shard_name(ShardName) of
+        false ->
+            false;
+        true ->
+            AgeDays = active_peruser_age_days(),
+            case AgeDays of
+                0 ->
+                    false;
+                _ ->
+                    CutoffSecs = erlang:system_time(second) - (AgeDays * 86400),
+                    is_dormant_by_mtime(ShardName, CutoffSecs)
+            end
+    end;
+is_dormant_peruser_shard(ShardName) when is_list(ShardName) ->
+    is_dormant_peruser_shard(list_to_binary(ShardName));
+is_dormant_peruser_shard(_) ->
+    false.
+
+is_dormant_peruser_shard_record(#shard{name = Name, dbname = DbName}, CutoffSecs) ->
+    case is_peruser_dbname(DbName) of
+        false ->
+            false;
+        true ->
+            is_dormant_by_mtime(Name, CutoffSecs)
+    end.
+
+is_peruser_shard_name(<<"shards/", _:8/binary, "-", _:8/binary, "/", Rest/binary>>) ->
+    is_peruser_dbname_with_suffix(Rest);
+is_peruser_shard_name(_) ->
+    false.
+
+is_peruser_dbname_with_suffix(<<"braid-", _/binary>>) ->
+    true;
+is_peruser_dbname_with_suffix(_) ->
+    false.
+
+is_peruser_dbname(DbName) when is_binary(DbName) ->
+    case DbName of
+        <<"braid-", _/binary>> -> true;
+        _ -> false
+    end;
+is_peruser_dbname(_) ->
+    false.
+
+%% @doc Returns true if the shard's .couch file exists and mtime < CutoffSecs.
+%% Returns false (KEEP shard) on any stat error or if the file mtime is
+%% recent enough.
+-spec is_dormant_by_mtime(binary(), integer()) -> boolean().
+is_dormant_by_mtime(ShardName, CutoffSecs) ->
+    Path = shard_file_path(ShardName),
+    case file:read_file_info(Path, [{time, posix}]) of
+        {ok, #file_info{mtime = MTime}} when is_integer(MTime) ->
+            MTime < CutoffSecs;
+        _ ->
+            %% File missing, permission denied, or any other error: be
+            %% conservative and KEEP the shard (do NOT silently skip).
+            false
+    end.
+
+shard_file_path(ShardName) when is_binary(ShardName) ->
+    shard_file_path(binary_to_list(ShardName));
+shard_file_path(ShardName) when is_list(ShardName) ->
+    RootDir = config:get("couchdb", "database_dir", "."),
+    filename:join([RootDir, "./" ++ ShardName ++ ".couch"]).
+
+active_peruser_age_days() ->
+    config:get_integer("mem3", "active_peruser_age_days", ?DEFAULT_ACTIVE_AGE_DAYS).
+
+%% =============================================================================
+%% Tests
+%% =============================================================================
+
+-ifdef(TEST).
+
+-include_lib("eunit/include/eunit.hrl").
+
+is_peruser_shard_name_test_() ->
+    [
+        ?_assert(is_peruser_shard_name(
+            <<"shards/00000000-7fffffff/braid-abc123.1234567890">>
+        )),
+        ?_assert(is_peruser_shard_name(
+            <<"shards/80000000-ffffffff/braid-x.0">>
+        )),
+        ?_assertNot(is_peruser_shard_name(
+            <<"shards/00000000-7fffffff/_users.1234567890">>
+        )),
+        ?_assertNot(is_peruser_shard_name(
+            <<"shards/00000000-7fffffff/_dbs.1234567890">>
+        )),
+        ?_assertNot(is_peruser_shard_name(
+            <<"shards/00000000-7fffffff/some_org_db.1234567890">>
+        )),
+        ?_assertNot(is_peruser_shard_name(<<"_users">>)),
+        ?_assertNot(is_peruser_shard_name(<<"braid-not-a-shard">>)),
+        ?_assertNot(is_peruser_shard_name(<<"">>))
+    ].
+
+is_peruser_dbname_test_() ->
+    [
+        ?_assert(is_peruser_dbname(<<"braid-abc">>)),
+        ?_assert(is_peruser_dbname(<<"braid-">>)),
+        ?_assertNot(is_peruser_dbname(<<"_users">>)),
+        ?_assertNot(is_peruser_dbname(<<"_dbs">>)),
+        ?_assertNot(is_peruser_dbname(<<"braid">>)),
+        ?_assertNot(is_peruser_dbname(<<"foo">>)),
+        ?_assertNot(is_peruser_dbname(undefined))
+    ].
+
+is_dormant_by_mtime_test_() ->
+    {
+        setup,
+        fun() ->
+            Dir = filename:join(["/tmp", "mem3_sync_filter_test"]),
+            os:cmd("rm -rf " ++ Dir),
+            ok = filelib:ensure_dir(filename:join([Dir, "shards/00000000-7fffffff/x"])),
+            meck:new(config, [passthrough]),
+            meck:expect(config, get, fun
+                ("couchdb", "database_dir", _) -> Dir;
+                (S, K, D) -> meck:passthrough([S, K, D])
+            end),
+            Dir
+        end,
+        fun(Dir) ->
+            meck:unload(config),
+            os:cmd("rm -rf " ++ Dir)
+        end,
+        fun(Dir) ->
+            ShardName = <<"shards/00000000-7fffffff/braid-active.1234">>,
+            File = filename:join([Dir, "./shards/00000000-7fffffff/braid-active.1234.couch"]),
+            ok = filelib:ensure_dir(File),
+            ok = file:write_file(File, <<>>),
+            Now = erlang:system_time(second),
+            MissingShard = <<"shards/00000000-7fffffff/braid-missing.1234">>,
+            [
+                %% Recent (just-written) file vs cutoff in the past: KEEP.
+                ?_assertNot(is_dormant_by_mtime(ShardName, Now - 86400)),
+                %% Recent file vs cutoff far in the future: DORMANT.
+                ?_assert(is_dormant_by_mtime(ShardName, Now + 86400)),
+                %% Missing file: KEEP (conservative — never silently skip).
+                ?_assertNot(is_dormant_by_mtime(MissingShard, Now + 86400))
+            ]
+        end
+    }.
+
+filter_dormant_peruser_shards_test_() ->
+    {
+        setup,
+        fun() ->
+            meck:new(config, [passthrough]),
+            meck:expect(config, get_integer, fun
+                ("mem3", "active_peruser_age_days", _) -> 0;
+                (S, K, D) -> meck:passthrough([S, K, D])
+            end)
+        end,
+        fun(_) -> meck:unload(config) end,
+        fun(_) ->
+            Shards = [
+                #shard{name = <<"shards/0/braid-x.1">>, dbname = <<"braid-x">>},
+                #shard{name = <<"shards/0/_users.1">>, dbname = <<"_users">>}
+            ],
+            [
+                %% age=0 disables the filter: all shards pass through.
+                ?_assertEqual(Shards, filter_dormant_peruser_shards(Shards))
+            ]
+        end
+    }.
+
+-endif.
