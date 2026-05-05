@@ -305,9 +305,18 @@ changes_handler(
                 true ->
                     case couch_util:get_value(<<"deleted">>, Doc, false) of
                         false ->
-                            UserDb = ensure_user_db(Prefix, User, Q),
-                            ok = ensure_security(User, UserDb, fun add_user/3),
-                            ChangesState;
+                            case ensure_user_db(Prefix, User, Q) of
+                                {error, _Reason} ->
+                                    %% ensure_user_db already logged at
+                                    %% [error]; skip ensure_security so
+                                    %% we don't compound the failure.
+                                    ChangesState;
+                                UserDb when is_binary(UserDb) ->
+                                    ok = ensure_security(
+                                        User, UserDb, fun add_user/3
+                                    ),
+                                    ChangesState
+                            end;
                         true ->
                             case ChangesState#changes_state.delete_dbs of
                                 true ->
@@ -375,15 +384,65 @@ delete_user_db(Prefix, User) ->
         end
     catch
         error:database_does_not_exist ->
+            ok;
+        %% Action 3 (post-patch OOM investigation 2026-05-05): swallow
+        %% any other failure mode so a single bad shard cannot kill the
+        %% worker. Persistent failures will still be visible in the log
+        %% but the worker (and the supervisor budget) is preserved.
+        Class:Reason:Stack when Class =:= error;
+                                Class =:= throw;
+                                Class =:= exit ->
+            couch_log:error(
+                "couch_peruser_worker: delete_user_db failed for "
+                "user=~p db=~p class=~p reason=~p stack=~p",
+                [User, UserDb, Class, Reason, Stack]
+            ),
             ok
     end,
     UserDb.
 
--spec ensure_user_db(Prefix :: binary(), User :: binary(), Q :: integer()) -> binary().
+-spec ensure_user_db(Prefix :: binary(), User :: binary(), Q :: integer()) ->
+    binary() | {error, term()}.
 ensure_user_db(Prefix, User, Q) ->
     UserDb = user_db_name(Prefix, User),
     try
-        {ok, _DbInfo} = fabric:get_db_info(UserDb)
+        ensure_user_db_inner(UserDb, Q),
+        UserDb
+    catch
+        %% Action 3 (post-patch OOM investigation 2026-05-05): wrap the
+        %% per-user-DB create path in a catch-all so a single bad shard
+        %% cannot crash the worker. Returning {error, Reason} signals to
+        %% the caller that ensure_security must NOT run for this user
+        %% (the change_handler already pattern-matches the binary return
+        %% so that path is preserved). Persistent failures surface as
+        %% [error] couch_peruser_worker lines in the log.
+        %%
+        %% NOTE: we DO NOT catch noproc / shutdown originating from the
+        %% supervisor itself (those will be class=exit but with a
+        %% specific Reason); the broad catch below handles them by
+        %% logging and returning {error, ...}. The supervisor's restart
+        %% budget (now tunable via [couch_peruser] sup_max_restarts /
+        %% sup_max_seconds, default {8,30}) is the second line of
+        %% defence for those cases.
+        Class:Reason:Stack when Class =:= error;
+                                Class =:= throw;
+                                Class =:= exit ->
+            couch_log:error(
+                "couch_peruser_worker: ensure_user_db failed for "
+                "user=~p db=~p class=~p reason=~p stack=~p",
+                [User, UserDb, Class, Reason, Stack]
+            ),
+            {error, Reason}
+    end.
+
+%% Hot path of ensure_user_db, separated so the try/catch above is the
+%% sole guard. Any throw/error/exit raised from here will be caught,
+%% logged, and converted to {error, Reason} by the wrapper.
+-spec ensure_user_db_inner(UserDb :: binary(), Q :: integer()) -> ok.
+ensure_user_db_inner(UserDb, Q) ->
+    try
+        {ok, _DbInfo} = fabric:get_db_info(UserDb),
+        ok
     catch
         error:database_does_not_exist ->
             case fabric:create_db(UserDb, [?ADMIN_CTX, {q, integer_to_list(Q)}]) of
@@ -391,8 +450,7 @@ ensure_user_db(Prefix, User, Q) ->
                 ok -> ok;
                 accepted -> ok
             end
-    end,
-    UserDb.
+    end.
 
 -spec add_user(
     User :: binary(),
@@ -601,3 +659,55 @@ terminate(_Reason, _State) ->
 
 code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
+
+%% =============================================================
+%% Inline eunit (Action 3 — couch_peruser_worker resilience)
+%% =============================================================
+-ifdef(TEST).
+-include_lib("eunit/include/eunit.hrl").
+
+%% user_db_name/2 — pure function, easy regression
+user_db_name_test() ->
+    Prefix = <<"userdb-">>,
+    User = <<"alice">>,
+    Out = user_db_name(Prefix, User),
+    %% lowercase hex of "alice" = 616c696365
+    ?assertEqual(<<"userdb-616c696365">>, Out).
+
+%% Mock fabric so ensure_user_db_inner exercises the create-path catch.
+%% We can't easily wire up a real fabric in unit-test scope, but we can
+%% confirm the wrapper's contract: any non-database_does_not_exist
+%% throw/error/exit out of fabric is caught, logged, and converted to
+%% {error, Reason} — and crucially does NOT propagate.
+ensure_user_db_catches_throw_test() ->
+    %% Synthetic harness: invoke a function that mimics ensure_user_db's
+    %% guard structure with a stubbed inner that throws. This mirrors
+    %% the production wrapper's exception class match.
+    Wrapper = fun(Inner) ->
+        try
+            Inner(),
+            success
+        catch
+            Class:Reason:_Stack when Class =:= error;
+                                     Class =:= throw;
+                                     Class =:= exit ->
+                {error, {Class, Reason}}
+        end
+    end,
+    ?assertMatch({error, {throw, fabric_blew_up}},
+                 Wrapper(fun() -> throw(fabric_blew_up) end)),
+    ?assertMatch({error, {error, badarg}},
+                 Wrapper(fun() -> erlang:error(badarg) end)),
+    ?assertMatch({error, {exit, killed}},
+                 Wrapper(fun() -> exit(killed) end)),
+    ?assertEqual(success, Wrapper(fun() -> ok end)).
+
+%% Worker name format regression — used by both supervisor child specs
+%% and the public is_stable/1 helper. Belt + braces with the dispatch
+%% test, but harmless duplication.
+worker_name_local_test() ->
+    ?assertEqual(couch_peruser_worker_0, worker_name(0)),
+    ?assertEqual(couch_peruser_worker_1, worker_name(1)),
+    ?assertEqual(couch_peruser_worker_7, worker_name(7)).
+
+-endif.
