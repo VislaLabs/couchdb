@@ -22,6 +22,10 @@
 
 setup_all() ->
     TestCtx = test_util:start_couch([chttpd]),
+    %% Pin the legacy tests to a single peruser worker so phash2
+    %% assignment is deterministic and matches the historical singleton
+    %% surface exercised by these cases.
+    ok = config:set("couch_peruser", "worker_count", "1", _Persist = false),
     ok = application:start(couch_peruser),
     Hashed = couch_passwords:hash_admin_password(?ADMIN_PASSWORD),
     ok = config:set("admins", ?ADMIN_USERNAME, ?b2l(Hashed), _Persist = false),
