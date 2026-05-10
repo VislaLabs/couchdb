@@ -565,14 +565,36 @@ user_db_name(Prefix, User) ->
 
 -spec exit_changes(State :: #state{}) -> ok.
 exit_changes(State) ->
-    lists:foreach(
-        fun(ChangesState) ->
-            demonitor(ChangesState#changes_state.changes_ref, [flush]),
-            unlink(ChangesState#changes_state.changes_pid),
-            exit(ChangesState#changes_state.changes_pid, kill)
-        end,
-        State#state.states
-    ).
+    %% Terminate the prior mem3_cluster — init_state spawns a fresh one each
+    %% time it runs. Without this, every update_config / cluster_unstable
+    %% cast leaks one mem3_cluster gen_server. Each leaked instance keeps
+    %% calling net_kernel:monitor_nodes(true) and casting cluster_unstable
+    %% back to this worker on every {nodeup,_}/{nodedown,_} event,
+    %% amplifying the worker's mailbox until net_kernel saturates and a
+    %% subsequent mem3_cluster:start_link blocks forever inside
+    %% proc_lib:sync_start_link/2 (observed: 49.9M backlog / 6 GiB heap on
+    %% one worker per node, 2026-05-09).
+    case State#state.mem3_cluster_pid of
+        undefined ->
+            ok;
+        OldPid when is_pid(OldPid) ->
+            unlink(OldPid),
+            exit(OldPid, kill)
+    end,
+    case State#state.states of
+        undefined ->
+            ok;
+        States when is_list(States) ->
+            lists:foreach(
+                fun(ChangesState) ->
+                    demonitor(ChangesState#changes_state.changes_ref, [flush]),
+                    unlink(ChangesState#changes_state.changes_pid),
+                    exit(ChangesState#changes_state.changes_pid, kill)
+                end,
+                States
+            )
+    end,
+    ok.
 
 -spec subscribe_for_changes() -> ok.
 subscribe_for_changes() ->
@@ -604,20 +626,17 @@ handle_call(is_stable, _From, #state{cluster_stable = IsStable} = State) ->
 handle_call(_Msg, _From, State) ->
     {reply, error, State}.
 
-handle_cast(update_config, State) when State#state.states =/= undefined ->
-    exit_changes(State),
-    {noreply,
-        init_state(State#state.worker_id, State#state.worker_count)};
 handle_cast(update_config, State) ->
+    %% exit_changes now also reaps the prior mem3_cluster_pid; the previous
+    %% guard `when State#state.states =/= undefined` could skip cleanup on
+    %% the first reconfig and leak a mem3_cluster.
+    exit_changes(State),
     {noreply,
         init_state(State#state.worker_id, State#state.worker_count)};
 handle_cast(stop, State) ->
     {stop, normal, State};
-handle_cast(cluster_unstable, State) when State#state.states =/= undefined ->
-    exit_changes(State),
-    {noreply,
-        init_state(State#state.worker_id, State#state.worker_count)};
 handle_cast(cluster_unstable, State) ->
+    exit_changes(State),
     {noreply,
         init_state(State#state.worker_id, State#state.worker_count)};
 handle_cast(cluster_stable, State) ->
