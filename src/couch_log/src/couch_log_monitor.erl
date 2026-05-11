@@ -15,7 +15,6 @@
 -behaviour(gen_server).
 -vsn(1).
 
-
 -export([
     start_link/0
 ]).
@@ -29,16 +28,10 @@
     code_change/3
 ]).
 
-
 -define(HANDLER_MOD, couch_log_error_logger_h).
-
 
 start_link() ->
     gen_server:start_link(?MODULE, [], []).
-
-
-% OTP_RELEASE defined in OTP >= 21 only
--ifdef(OTP_RELEASE).
 
 init(_) ->
     % see https://erlang.org/doc/man/error_logger.html#add_report_handler-1
@@ -46,35 +39,19 @@ init(_) ->
     ok = gen_event:add_sup_handler(error_logger, ?HANDLER_MOD, []),
     {ok, nil}.
 
--else.
-
-init(_) ->
-    error_logger:start(),
-    ok = gen_event:add_sup_handler(error_logger, ?HANDLER_MOD, []),
-    {ok, nil}.
-
--endif.
-
-
 terminate(_, _) ->
     ok.
-
 
 handle_call(_Msg, _From, St) ->
     {reply, ignored, St}.
 
-
 handle_cast(_Msg, St) ->
     {noreply, St}.
 
-
 handle_info({gen_event_EXIT, ?HANDLER_MOD, Reason}, St) ->
     {stop, Reason, St};
-
-
 handle_info(_Msg, St) ->
     {noreply, St}.
-
 
 code_change(_, State, _) ->
     {ok, State}.

@@ -26,10 +26,12 @@
 -module(weatherreport_check_ioq).
 -behaviour(weatherreport_check).
 
--export([description/0,
-         valid/0,
-         check/1,
-         format/1]).
+-export([
+    description/0,
+    valid/0,
+    check/1,
+    format/1
+]).
 
 -define(THRESHOLD, 500).
 
@@ -67,9 +69,13 @@ check(Opts) ->
         true ->
             case ioq:get_queue_lengths() of
                 Queues when is_map(Queues) ->
-                    Total = maps:fold(fun(_Key, Val, Acc) ->
-                        Val + Acc
-                    end, 0, Queues),
+                    Total = maps:fold(
+                        fun(_Key, Val, Acc) ->
+                            Val + Acc
+                        end,
+                        0,
+                        Queues
+                    ),
                     [{total_to_level(Total), {ioq_requests, Total, Queues}}];
                 Error ->
                     [{warning, {ioq_requests_unknown, Error}}]
@@ -79,7 +85,14 @@ check(Opts) ->
     end.
 
 -spec check_legacy(list()) -> [{atom(), term()}].
-check_legacy(_Opts) ->
+check_legacy(Opts) ->
+    case erlang:function_exported(ioq, get_disk_queues, 0) of
+        true -> check_legacy_int(Opts);
+        false -> [{warning, {ioq_requests_unknown, undef}}]
+    end.
+
+-spec check_legacy_int(list()) -> [{atom(), term()}].
+check_legacy_int(_Opts) ->
     case ioq:get_disk_queues() of
         Queues when is_list(Queues) ->
             Total = sum_queues(Queues, 0),

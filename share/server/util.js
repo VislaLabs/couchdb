@@ -58,11 +58,11 @@ var resolveModule = function(names, mod, root) {
 
 var Couch = {
   // moving this away from global so we can move to json2.js later
-  compileFunction : function(source, ddoc, name) {
+  compileFunction : function(source, ddoc, name, sandbox) {
     if (!source) throw(["error","not_found","missing function"]);
 
     var functionObject = null;
-    var sandbox = create_sandbox();
+    var sandbox = sandbox || create_sandbox();
 
     var require = function(name, module) {
       module = module || {};
@@ -81,8 +81,7 @@ var Couch = {
           throw [
             "error",
             "compilation_error",
-            "Module require('" +name+ "') raised error " +
-            (e.toSource ? e.toSource() : e.stack)
+            "Module require('" +name+ "') raised error " + e.toSource()
           ];
         }
         ddoc._module_cache[newModule.id] = newModule.exports;
@@ -107,7 +106,7 @@ var Couch = {
       throw([
         "error",
         "compilation_error",
-        (err.toSource ? err.toSource() : err.stack) + " (" + source + ")"
+        err.toSource() + " (" + source + ")"
       ]);
     };
     if (typeof(functionObject) == "function") {
@@ -118,13 +117,7 @@ var Couch = {
     };
   },
   recursivelySeal : function(obj) {
-    // seal() is broken in current Spidermonkey
-    try {
-      seal(obj);
-    } catch (x) {
-      // Sealing of arrays broken in some SpiderMonkey versions.
-      // https://bugzilla.mozilla.org/show_bug.cgi?id=449657
-    }
+    seal(obj);
     for (var propname in obj) {
       if (typeof obj[propname] == "object") {
         arguments.callee(obj[propname]);
@@ -139,7 +132,7 @@ function respond(obj) {
     print(JSON.stringify(obj));
   } catch(e) {
     log("Error converting object to JSON: " + e.toString());
-    log("error on obj: "+ (obj.toSource ? obj.toSource() : obj.toString()));
+    log("error on obj: "+ obj.toSource());
   }
 };
 

@@ -64,6 +64,22 @@ associated ``devcontainer.json`` file to quickly provision a
 development environment using `GitHub Codespaces <https://github.com/features/codespaces>`_
 or `Visual Studio Code <https://code.visualstudio.com/docs/remote/containers>`_.
 
+
+.. image:: https://img.shields.io/static/v1?label=Remote%20-%20Containers&message=Open&color=blue&logo=visualstudiocode
+    :target: https://vscode.dev/redirect?url=vscode://ms-vscode-remote.remote-containers/cloneInVolume?url=https://github.com/apache/couchdb
+
+If you already have VS Code and Docker installed, you can click the badge above or 
+`here <https://vscode.dev/redirect?url=vscode://ms-vscode-remote.remote-containers/cloneInVolume?url=https://github.com/apache/couchdb>`_ 
+to get started. Clicking these links will cause VS Code to automatically install the 
+Remote - Containers extension if needed, clone the source code into a container volume, 
+and spin up a dev container for use.
+
+This ``devcontainer`` will automatically run ``./configure && make`` the first time it is created.  
+While this may take some extra time to spin up, this tradeoff means you will be able to 
+run things like ``./dev/run``, ``./dev/run --admin=admin:admin``,  ``./dev/run --with-admin-party-please``, 
+and ``make check`` straight away.  Subsequent startups should be quick.
+
+
 Debian-based (inc. Ubuntu) Systems
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -139,6 +155,20 @@ If you don't want to build Fauxton or documentation specify
 ignore their build and avoid any issues with their dependencies.
 
 See ``./configure --help`` for more information.
+
+Developing
+----------
+
+Formatting
+~~~~~~~~~~
+
+The ``erl`` files in ``src`` are formatted using erlfmt_. The checks are run
+for every PR in the CI. To run the checks locally, run ``make erlfmt-check``.
+To format the ``erl`` files in ``src``, run ``make erlfmt-format``.
+To use ``erlfmt`` for specific files only, use the executable ``bin/erlfmt``
+that is installed by ``configure``.
+
+.. _erlfmt: https://github.com/WhatsApp/erlfmt
 
 Testing
 -------

@@ -12,9 +12,7 @@
 
 -module(eunit_plugin).
 
-
 -export([setup_eunit/2]).
-
 
 setup_eunit(Config, AppFile) ->
     case is_base_dir(Config) of
@@ -22,33 +20,35 @@ setup_eunit(Config, AppFile) ->
         true -> build_eunit_config(Config, AppFile)
     end.
 
-
 %% from https://github.com/ChicagoBoss/ChicagoBoss/blob/master/skel/priv/rebar/boss_plugin.erl
 is_base_dir(RebarConf) ->
-    filename:absname(rebar_utils:get_cwd()) =:= rebar_config:get_xconf(RebarConf, base_dir, undefined).
-
+    filename:absname(rebar_utils:get_cwd()) =:=
+        rebar_config:get_xconf(RebarConf, base_dir, undefined).
 
 build_eunit_config(Config0, AppFile) ->
     Cwd = filename:absname(rebar_utils:get_cwd()),
     DataDir = Cwd ++ "/tmp/data",
     ViewIndexDir = Cwd ++ "/tmp/data",
+    StateDir = Cwd ++ "/tmp/data",
     TmpDataDir = Cwd ++ "/tmp/tmp_data",
     cleanup_dirs([DataDir, TmpDataDir]),
     Config1 = rebar_config:set_global(Config0, template, "setup_eunit"),
     Config2 = rebar_config:set_global(Config1, prefix, Cwd),
     Config3 = rebar_config:set_global(Config2, data_dir, DataDir),
-    Config = rebar_config:set_global(Config3, view_index_dir, ViewIndexDir),
+    Config4 = rebar_config:set_global(Config3, view_index_dir, ViewIndexDir),
+    Config = rebar_config:set_global(Config4, state_dir, StateDir),
     rebar_templater:create(Config, AppFile).
 
-
 cleanup_dirs(Dirs) ->
-    lists:foreach(fun(Dir) ->
-        case filelib:is_dir(Dir) of
-            true -> del_dir(Dir);
-            false -> ok
-        end
-    end, Dirs).
-
+    lists:foreach(
+        fun(Dir) ->
+            case filelib:is_dir(Dir) of
+                true -> del_dir(Dir);
+                false -> ok
+            end
+        end,
+        Dirs
+    ).
 
 del_dir(Dir) ->
     All = filelib:wildcard(Dir ++ "/**"),

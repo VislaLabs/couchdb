@@ -14,7 +14,6 @@
 
 -include_lib("couch/include/couch_eunit.hrl").
 
-
 validate_callback_exists_test_() ->
     {
         "validate_callback_exists tests",
@@ -33,8 +32,10 @@ implode_test() ->
     ?assertEqual([1, 38, 2, 38, 3], couch_util:implode([1, 2, 3], "&")).
 
 trim_test() ->
-    lists:map(fun(S) -> ?assertEqual("foo", couch_util:trim(S)) end,
-              [" foo", "foo ", "\tfoo", " foo ", "foo\t", "foo\n", "\nfoo"]).
+    lists:map(
+        fun(S) -> ?assertEqual("foo", couch_util:trim(S)) end,
+        [" foo", "foo ", "\tfoo", " foo ", "foo\t", "foo\n", "\nfoo"]
+    ).
 
 abs_pathname_test() ->
     {ok, Cwd} = file:get_cwd(),
@@ -44,8 +45,10 @@ flush_test() ->
     ?assertNot(couch_util:should_flush()),
     AcquireMem = fun() ->
         _IntsToAGazillion = lists:seq(1, 200000),
-        _LotsOfData = lists:map(fun(_) -> <<"foobar">> end,
-                                lists:seq(1, 500000)),
+        _LotsOfData = lists:map(
+            fun(_) -> <<"foobar">> end,
+            lists:seq(1, 500000)
+        ),
         _ = list_to_binary(_LotsOfData),
 
         %% Allocation 200K tuples puts us above the memory threshold
@@ -97,11 +100,20 @@ find_in_binary_test_() ->
     ],
     lists:map(
         fun({Needle, Haystack, Result}) ->
-            Msg = lists:flatten(io_lib:format("Looking for ~s in ~s",
-                                              [Needle, Haystack])),
-            {Msg, ?_assertMatch(Result,
-                                couch_util:find_in_binary(Needle, Haystack))}
-        end, Cases).
+            Msg = lists:flatten(
+                io_lib:format(
+                    "Looking for ~s in ~s",
+                    [Needle, Haystack]
+                )
+            ),
+            {Msg,
+                ?_assertMatch(
+                    Result,
+                    couch_util:find_in_binary(Needle, Haystack)
+                )}
+        end,
+        Cases
+    ).
 
 should_succeed_for_existent_cb() ->
     ?_assert(couch_util:validate_callback_exists(lists, any, 2)).
@@ -115,18 +127,65 @@ should_fail_for_missing_cb() ->
     lists:map(
         fun({M, F, A} = MFA) ->
             Name = lists:flatten(io_lib:format("~w:~w/~w", [M, F, A])),
-            {Name, ?_assertThrow(
-                {error, {undefined_callback, Name, MFA}},
-                couch_util:validate_callback_exists(M, F, A))}
-        end, Cases).
+            {Name,
+                ?_assertThrow(
+                    {error, {undefined_callback, Name, MFA}},
+                    couch_util:validate_callback_exists(M, F, A)
+                )}
+        end,
+        Cases
+    ).
 
 to_hex_test_() ->
     [
         ?_assertEqual("", couch_util:to_hex([])),
+        ?_assertEqual(<<>>, couch_util:to_hex_bin(<<>>)),
+        ?_assertEqual(<<"00">>, couch_util:to_hex_bin(<<0>>)),
+        ?_assertEqual(<<"01">>, couch_util:to_hex_bin(<<1>>)),
         ?_assertEqual("010203faff", couch_util:to_hex([1, 2, 3, 250, 255])),
+        ?_assertEqual(<<"010203faff">>, couch_util:to_hex_bin(<<1, 2, 3, 250, 255>>)),
         ?_assertEqual("", couch_util:to_hex(<<>>)),
         ?_assertEqual("010203faff", couch_util:to_hex(<<1, 2, 3, 250, 255>>))
     ].
+
+to_hex_range_test() ->
+    lists:foreach(
+        fun(PrefixSize) ->
+            lists:foreach(
+                fun(I) ->
+                    Prefix = list_to_binary(lists:duplicate(PrefixSize, 1)),
+                    Bin = <<Prefix/binary, I:8/integer>>,
+                    ?assertEqual(list_to_binary(to_hex_simple(Bin)), couch_util:to_hex_bin(Bin))
+                end,
+                lists:seq(0, 16#ff)
+            )
+        end,
+        lists:seq(0, 8)
+    ).
+
+% Use previous implementation from couch_util for validation
+%
+to_hex_simple(<<Hi:4, Lo:4, Rest/binary>>) ->
+    [nibble_to_hex(Hi), nibble_to_hex(Lo) | to_hex_simple(Rest)];
+to_hex_simple(<<>>) ->
+    [].
+
+nibble_to_hex(0) -> $0;
+nibble_to_hex(1) -> $1;
+nibble_to_hex(2) -> $2;
+nibble_to_hex(3) -> $3;
+nibble_to_hex(4) -> $4;
+nibble_to_hex(5) -> $5;
+nibble_to_hex(6) -> $6;
+nibble_to_hex(7) -> $7;
+nibble_to_hex(8) -> $8;
+nibble_to_hex(9) -> $9;
+nibble_to_hex(10) -> $a;
+nibble_to_hex(11) -> $b;
+nibble_to_hex(12) -> $c;
+nibble_to_hex(13) -> $d;
+nibble_to_hex(14) -> $e;
+nibble_to_hex(15) -> $f.
 
 json_decode_test_() ->
     [

@@ -17,7 +17,9 @@
 include version.mk
 
 SHELL=cmd.exe
-REBAR=bin\rebar.cmd
+REBAR?=$(CURDIR)\bin\rebar.cmd
+PYTHON=python.exe
+ERLFMT?=$(CURDIR)\bin\erlfmt.cmd
 MAKE=make -f Makefile.win
 # REBAR?=$(shell where rebar.cmd)
 
@@ -76,7 +78,7 @@ DESTDIR=
 
 # Rebar options
 apps=
-skip_deps=folsom,meck,mochiweb,triq,proper,snappy,bcrypt,hyper
+skip_deps=folsom,meck,mochiweb,triq,proper,snappy,bcrypt,hyper,ibrowse,local
 suites=
 tests=
 
@@ -104,7 +106,7 @@ all: couch fauxton docs
 
 
 .PHONY: couch
-# target: couch - Build CouchDB core, use ERL_OPTS to provide custom compiler's options
+# target: couch - Build CouchDB core, use ERL_COMPILER_OPTIONS to provide custom compiler's options
 couch: config.erl
 	@set COUCHDB_VERSION=$(COUCHDB_VERSION) && set COUCHDB_GIT_SHA=$(COUCHDB_GIT_SHA) && $(REBAR) compile $(COMPILE_OPTS)
 	@copy src\couch\priv\couchjs.exe bin
@@ -130,7 +132,7 @@ fauxton: share\www
 
 .PHONY: check
 # target: check - Test everything
-check: all python-black
+check: all
 	@$(MAKE) eunit
 	@$(MAKE) mango-test
 	@$(MAKE) elixir
@@ -156,41 +158,49 @@ eunit: couch
 exunit: export BUILDDIR = $(shell echo %cd%)
 exunit: export MIX_ENV=test
 exunit: export ERL_LIBS = $(shell echo %cd%)\src
-exunit: export ERL_AFLAGS = -config $(shell echo %cd%)/rel/files/eunit.config
+exunit: export ERL_AFLAGS = $(shell echo "-config rel/files/eunit.config")
 exunit: export COUCHDB_QUERY_SERVER_JAVASCRIPT = $(shell echo %cd%)/bin/couchjs $(shell echo %cd%)/share/server/main.js
 exunit: couch elixir-init setup-eunit elixir-check-formatted elixir-credo
 	@mix test --cover --trace $(EXUNIT_OPTS)
 
 setup-eunit: export BUILDDIR = $(shell pwd)
-setup-eunit: export ERL_AFLAGS = "-config $(shell echo %cd%)/rel/files/eunit.config")
+setup-eunit: export ERL_AFLAGS = $(shell echo "-config rel/files/eunit.config")
 setup-eunit:
 	@$(REBAR) setup_eunit 2> nul
 
 just-eunit: export BUILDDIR = $(shell pwd)
-just-eunit: export ERL_AFLAGS = "-config $(shell echo %cd%)/rel/files/eunit.config")
+just-eunit: export ERL_AFLAGS = $(shell echo "-config rel/files/eunit.config")
 just-eunit:
 	@$(REBAR) -r eunit $(EUNIT_OPTS)
 
+erlfmt-check: export ERLFMT_PATH := $(ERLFMT)
+erlfmt-check:
+	@$(PYTHON) dev\format_check.py
+
+erlfmt-format: export ERLFMT_PATH := $(ERLFMT)
+erlfmt-format:
+	@$(PYTHON) dev\format_all.py
+
 .venv/bin/black:
-	@python.exe -m venv .venv
+	@$(PYTHON) -m venv .venv
 	@.venv\Scripts\pip3.exe install black || copy /b .venv\Scripts\black.exe +,,
 
 # Python code formatter - only runs if we're on Python 3.6 or greater
 python-black: .venv/bin/black
-	@python.exe -c "import sys; exit(1 if sys.version_info < (3,6) else 0)" || \
+	@$(PYTHON) -c "import sys; exit(1 if sys.version_info < (3,6) else 0)" || \
 		echo 'Python formatter not supported on Python < 3.6; check results on a newer platform'
-	@python.exe -c "import sys; exit(1 if sys.version_info >= (3,6) else 0)" || \
+	@$(PYTHON) -c "import sys; exit(1 if sys.version_info >= (3,6) else 0)" || \
 		.venv\Scripts\black.exe --check \
-		--exclude="build/|buck-out/|dist/|_build/|\.git/|\.hg/|\.mypy_cache/|\.nox/|\.tox/|\.venv/|src/rebar/pr2relnotes.py|src/fauxton" \
-		build-aux dev\run src\mango\test src\docs\src\conf.py src\docs\ext .
+		--exclude="build/|buck-out/|dist/|_build/|\.git/|\.hg/|\.mypy_cache/|\.nox/|\.tox/|\.venv/|src/erlfmt|src/rebar/pr2relnotes.py|src/fauxton" \
+		build-aux dev\run dev\format_*.py src\mango\test src\docs\src\conf.py src\docs\ext .
 
 python-black-update: .venv/bin/black
-	@python.exe -c "import sys; exit(1 if sys.version_info < (3,6) else 0)" || \
+	@$(PYTHON) -c "import sys; exit(1 if sys.version_info < (3,6) else 0)" || \
 		echo 'Python formatter not supported on Python < 3.6; check results on a newer platform'
-	@python.exe -c "import sys; exit(1 if sys.version_info >= (3,6) else 0)" || \
+	@$(PYTHON) -c "import sys; exit(1 if sys.version_info >= (3,6) else 0)" || \
 		.venv\Scripts\black.exe \
-		--exclude="build/|buck-out/|dist/|_build/|\.git/|\.hg/|\.mypy_cache/|\.nox/|\.tox/|\.venv/|src/rebar/pr2relnotes.py|src/fauxton" \
-		build-aux dev\run src\mango\test src\docs\src\conf.py src\docs\ext .
+		--exclude="build/|buck-out/|dist/|_build/|\.git/|\.hg/|\.mypy_cache/|\.nox/|\.tox/|\.venv/|src/erlfmt|src/rebar/pr2relnotes.py|src/fauxton" \
+		build-aux dev\run dev\format_*.py src\mango\test src\docs\src\conf.py src\docs\ext .
 
 .PHONY: elixir
 elixir: export MIX_ENV=integration
@@ -252,7 +262,7 @@ mango-test: devclean all
 	@cd src\mango && \
 		python.exe -m venv .venv && \
 		.venv\Scripts\pip.exe install -r requirements.txt
-	@cd src\mango && .venv\Scripts\python.exe ..\..\dev\run -n 1 --admin=testuser:testpass .venv\Scripts\nosetests
+	@cd src\mango && .venv\Scripts\python.exe ..\..\dev\run -n 1 --admin=testuser:testpass .venv\Scripts\nose2
 
 
 ################################################################################
@@ -364,7 +374,7 @@ clean:
 	-@rmdir /s/q src\*\.rebar
 	-@del /f/q/s src\*.dll
 	-@del /f/q src\couch\priv\*.exe
-	-@del /f/q share\server\main.js share\server\main-coffee.js
+	-@del /f/q share\server\main.js share\server\main-ast-bypass.js share\server\main-coffee.js
 	-@rmdir /s/q tmp
 	-@rmdir /s/q dev\data
 	-@rmdir /s/q dev\lib

@@ -13,19 +13,16 @@
 -module(fabric_db_uuids_tests).
 
 -include_lib("couch/include/couch_eunit.hrl").
--include_lib("couch/include/couch_db.hrl").
 -include_lib("mem3/include/mem3.hrl").
-
--define(TDEF(A), {atom_to_list(A), fun A/0}).
 
 main_test_() ->
     {
         setup,
         fun setup/0,
         fun teardown/1,
-        [
+        with([
             ?TDEF(t_can_get_shard_uuids)
-        ]
+        ])
     }.
 
 setup() ->
@@ -35,17 +32,21 @@ teardown(Ctx) ->
     meck:unload(),
     test_util:stop_couch(Ctx).
 
-t_can_get_shard_uuids() ->
+t_can_get_shard_uuids(_) ->
     DbName = ?tempdb(),
     ok = fabric:create_db(DbName, []),
     Shards = mem3:shards(DbName),
     {ok, Uuids} = fabric:db_uuids(DbName),
     ?assertEqual(length(Shards), map_size(Uuids)),
-    UuidsFromShards = lists:foldl(fun(#shard{} = Shard, Acc) ->
-        Uuid = couch_util:with_db(Shard#shard.name, fun(Db) ->
-            couch_db:get_uuid(Db)
-        end),
-        Acc#{Uuid => Shard}
-    end, #{}, Shards),
+    UuidsFromShards = lists:foldl(
+        fun(#shard{} = Shard, Acc) ->
+            Uuid = couch_util:with_db(Shard#shard.name, fun(Db) ->
+                couch_db:get_uuid(Db)
+            end),
+            Acc#{Uuid => Shard}
+        end,
+        #{},
+        Shards
+    ),
     ?assertEqual(UuidsFromShards, Uuids),
     ok = fabric:delete_db(DbName, []).

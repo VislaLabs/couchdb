@@ -12,14 +12,9 @@
 
 -module(test_util).
 
--include_lib("couch/include/couch_eunit.hrl").
--include("couch_db.hrl").
--include("couch_db_int.hrl").
--include("couch_bt_engine.hrl").
-
 -export([init_code_path/0]).
 -export([source_file/1, build_file/1]).
-%% -export([run/2]).
+-export([revtree_generate/4, revtree_get_revs/1, random_rev/0]).
 
 -export([start_couch/0, start_couch/1, start_couch/2, stop_couch/0, stop_couch/1]).
 -export([start_config/1, stop_config/1]).
@@ -33,15 +28,23 @@
 -export([wait_process/1, wait_process/2]).
 -export([wait/1, wait/2, wait/3]).
 -export([wait_value/2, wait_other_value/2]).
+-export([with_processes_restart/2, with_processes_restart/4]).
+-export([with_couch_server_restart/1]).
 
 -export([start/1, start/2, start/3, stop/1]).
 
 -export([fake_db/1]).
 
+-export([shuffle/1]).
+
+-include_lib("couch/include/couch_eunit.hrl").
+-include_lib("couch/include/couch_db.hrl").
+-include("couch_db_int.hrl").
+-include("couch_bt_engine.hrl").
+
 -record(test_context, {mocked = [], started = [], module}).
 
--define(DEFAULT_APPS,
-        [inets, ibrowse, ssl, config, couch_epi, couch_event, couch]).
+-define(DEFAULT_APPS, [inets, ibrowse, ssl, config, couch_epi, couch_event, couch]).
 
 srcdir() ->
     code:priv_dir(couch) ++ "/../../".
@@ -57,9 +60,12 @@ init_code_path() ->
         "mochiweb",
         "snappy"
     ],
-    lists:foreach(fun(Name) ->
-        code:add_patha(filename:join([builddir(), "src", Name]))
-    end, Paths).
+    lists:foreach(
+        fun(Name) ->
+            code:add_patha(filename:join([builddir(), "src", Name]))
+        end,
+        Paths
+    ).
 
 source_file(Name) ->
     filename:join([srcdir(), Name]).
@@ -88,27 +94,31 @@ stop_couch(#test_context{started = Apps}) ->
 stop_couch(_) ->
     stop_couch().
 
+with_couch_server_restart(Fun) ->
+    Servers = couch_server:names(),
+    test_util:with_processes_restart(Servers, Fun).
+
 start_applications(Apps) ->
     StartOrder = calculate_start_order(Apps),
     start_applications(StartOrder, []).
 
 start_applications([], Acc) ->
     lists:reverse(Acc);
-start_applications([App|Apps], Acc) when App == kernel; App == stdlib ->
+start_applications([App | Apps], Acc) when App == kernel; App == stdlib ->
     start_applications(Apps, Acc);
-start_applications([App|Apps], Acc) ->
+start_applications([App | Apps], Acc) ->
     case application:start(App) of
-    {error, {already_started, crypto}} ->
-        start_applications(Apps, [crypto | Acc]);
-    {error, {already_started, App}} ->
-        io:format(standard_error, "Application ~s was left running!~n", [App]),
-        application:stop(App),
-        start_applications([App|Apps], Acc);
-    {error, Reason} ->
-        io:format(standard_error, "Cannot start application '~s', reason ~p~n", [App, Reason]),
-        throw({error, {cannot_start, App, Reason}});
-    ok ->
-        start_applications(Apps, [App|Acc])
+        {error, {already_started, crypto}} ->
+            start_applications(Apps, [crypto | Acc]);
+        {error, {already_started, App}} ->
+            io:format(standard_error, "Application ~s was left running!~n", [App]),
+            application:stop(App),
+            start_applications([App | Apps], Acc);
+        {error, Reason} ->
+            io:format(standard_error, "Cannot start application '~s', reason ~p~n", [App, Reason]),
+            throw({error, {cannot_start, App, Reason}});
+        ok ->
+            start_applications(Apps, [App | Acc])
     end.
 
 stop_applications(Apps) ->
@@ -119,11 +129,10 @@ start_config(Chain) ->
     case config:start_link(Chain) of
         {ok, Pid} ->
             {ok, Pid};
-        {error, {already_started, OldPid}}  ->
+        {error, {already_started, OldPid}} ->
             ok = stop_config(OldPid),
             start_config(Chain)
     end.
-
 
 stop_config(Pid) ->
     Timeout = 1000,
@@ -150,8 +159,8 @@ stop_sync(Pid, Fun, Timeout) when is_function(Fun) and is_pid(Pid) ->
             catch unlink(Pid),
             Res = (catch Fun()),
             receive
-            {'DOWN', MRef, _, _, _} ->
-                Res
+                {'DOWN', MRef, _, _, _} ->
+                    Res
             after Timeout ->
                 timeout
             end
@@ -159,7 +168,8 @@ stop_sync(Pid, Fun, Timeout) when is_function(Fun) and is_pid(Pid) ->
     after
         erlang:demonitor(MRef, [flush])
     end;
-stop_sync(_, _, _) -> error(badarg).
+stop_sync(_, _, _) ->
+    error(badarg).
 
 stop_sync_throw(Name, Error) ->
     stop_sync_throw(Name, shutdown, Error).
@@ -176,7 +186,8 @@ stop_sync_throw(Pid, Fun, Error, Timeout) ->
 
 with_process_restart(Name) ->
     {Pid, true} = with_process_restart(
-        Name, fun() -> exit(whereis(Name), shutdown) end),
+        Name, fun() -> exit(whereis(Name), shutdown) end
+    ),
     Pid.
 
 with_process_restart(Name, Fun) ->
@@ -185,24 +196,26 @@ with_process_restart(Name, Fun) ->
 with_process_restart(Name, Fun, Timeout) ->
     Res = stop_sync(Name, Fun),
     case wait_process(Name, Timeout) of
-    timeout ->
-        timeout;
-    Pid ->
-        {Pid, Res}
+        timeout ->
+            timeout;
+        Pid ->
+            {Pid, Res}
     end.
-
 
 wait_process(Name) ->
     wait_process(Name, 5000).
 wait_process(Name, Timeout) ->
-    wait(fun() ->
-       case whereis(Name) of
-       undefined ->
-          wait;
-       Pid ->
-          Pid
-       end
-    end, Timeout).
+    wait(
+        fun() ->
+            case whereis(Name) of
+                undefined ->
+                    wait;
+                Pid ->
+                    Pid
+            end
+        end,
+        Timeout
+    ).
 
 wait(Fun) ->
     wait(Fun, 5000, 50).
@@ -218,11 +231,11 @@ wait(_Fun, Timeout, _Delay, Started, Prev) when Prev - Started > Timeout ->
     timeout;
 wait(Fun, Timeout, Delay, Started, _Prev) ->
     case Fun() of
-    wait ->
-        ok = timer:sleep(Delay),
-        wait(Fun, Timeout, Delay, Started, now_us());
-    Else ->
-        Else
+        wait ->
+            ok = timer:sleep(Delay),
+            wait(Fun, Timeout, Delay, Started, now_us());
+        Else ->
+            Else
     end.
 
 wait_value(Fun, Value) ->
@@ -240,6 +253,38 @@ wait_other_value(Fun, Value) ->
             Other -> Other
         end
     end).
+
+with_processes_restart(Processes, Fun) ->
+    with_processes_restart(Processes, Fun, 5000, 50).
+
+with_processes_restart(Names, Fun, Timeout, Delay) ->
+    Processes = lists:foldl(
+        fun(Name, Acc) ->
+            [{Name, whereis(Name)} | Acc]
+        end,
+        [],
+        Names
+    ),
+    [catch unlink(Pid) || {_, Pid} <- Processes],
+    Res = (catch Fun()),
+    {wait_start(Processes, Timeout, Delay), Res}.
+
+wait_start(Processses, TimeoutInSec, Delay) ->
+    Now = now_us(),
+    wait_start(Processses, TimeoutInSec * 1000, Delay, Now, Now, #{}).
+
+wait_start(_, Timeout, _Delay, Started, Prev, _) when Prev - Started > Timeout ->
+    timeout;
+wait_start([], _Timeout, _Delay, _Started, _Prev, Res) ->
+    Res;
+wait_start([{Name, Pid} | Rest] = Processes, Timeout, Delay, Started, _Prev, Res) ->
+    case whereis(Name) of
+        NewPid when is_pid(NewPid) andalso NewPid =/= Pid ->
+            wait_start(Rest, Timeout, Delay, Started, now_us(), maps:put(Name, NewPid, Res));
+        _ ->
+            ok = timer:sleep(Delay),
+            wait_start(Processes, Timeout, Delay, Started, now_us(), Res)
+    end.
 
 start(Module) ->
     start(Module, [], []).
@@ -260,13 +305,17 @@ stop(#test_context{mocked = Mocked, started = Apps}) ->
 fake_db(Fields0) ->
     {ok, Db, Fields} = maybe_set_engine(Fields0),
     Indexes = lists:zip(
-            record_info(fields, db),
-            lists:seq(2, record_info(size, db))
-        ),
-    lists:foldl(fun({FieldName, Value}, Acc) ->
-        Idx = couch_util:get_value(FieldName, Indexes),
-        setelement(Idx, Acc, Value)
-    end, Db, Fields).
+        record_info(fields, db),
+        lists:seq(2, record_info(size, db))
+    ),
+    lists:foldl(
+        fun({FieldName, Value}, Acc) ->
+            Idx = couch_util:get_value(FieldName, Indexes),
+            setelement(Idx, Acc, Value)
+        end,
+        Db,
+        Fields
+    ).
 
 maybe_set_engine(Fields0) ->
     case lists:member(engine, Fields0) of
@@ -279,11 +328,24 @@ maybe_set_engine(Fields0) ->
     end.
 
 get_engine_header(Fields) ->
-    Keys = [disk_version, update_seq, unused, id_tree_state,
-        seq_tree_state, local_tree_state, purge_seq, purged_docs,
-        security_ptr, revs_limit, uuid, epochs, compacted_seq],
+    Keys = [
+        disk_version,
+        update_seq,
+        unused,
+        id_tree_state,
+        seq_tree_state,
+        local_tree_state,
+        purge_seq,
+        purged_docs,
+        security_ptr,
+        revs_limit,
+        uuid,
+        epochs,
+        compacted_seq
+    ],
     {HeadFields, RestFields} = lists:partition(
-        fun({K, _}) -> lists:member(K, Keys) end, Fields),
+        fun({K, _}) -> lists:member(K, Keys) end, Fields
+    ),
     Header0 = couch_bt_engine_header:new(),
     Header = couch_bt_engine_header:set(Header0, HeadFields),
     {ok, Header, RestFields}.
@@ -315,7 +377,7 @@ load_applications_with_stats() ->
     ok.
 
 stats_file_to_app(File) ->
-    [_Desc, _Priv, App|_] = lists:reverse(filename:split(File)),
+    [_Desc, _Priv, App | _] = lists:reverse(filename:split(File)),
     erlang:list_to_atom(App).
 
 calculate_start_order(Apps) ->
@@ -345,14 +407,19 @@ load_app_deps(App, StartOrder) ->
                 {error, {already_loaded, App}} -> ok
             end,
             {ok, Apps} = application:get_key(App, applications),
-            Deps = case App of
-                kernel -> Apps;
-                stdlib -> Apps;
-                _ -> lists:usort([kernel, stdlib | Apps])
-            end,
-            NewStartOrder = lists:foldl(fun(Dep, Acc) ->
-                load_app_deps(Dep, Acc)
-            end, StartOrder, Deps),
+            Deps =
+                case App of
+                    kernel -> Apps;
+                    stdlib -> Apps;
+                    _ -> lists:usort([kernel, stdlib | Apps])
+                end,
+            NewStartOrder = lists:foldl(
+                fun(Dep, Acc) ->
+                    load_app_deps(Dep, Acc)
+                end,
+                StartOrder,
+                Deps
+            ),
             [App | NewStartOrder]
     end.
 
@@ -362,3 +429,62 @@ sort_apps(Apps) ->
 
 weight_app(couch_log) -> {0.0, couch_log};
 weight_app(Else) -> {1.0, Else}.
+
+% Generate random rev trees
+%
+% Args:
+%   Depth : Max depth. This will be halfed every time we branch.
+%
+%   BranchChance : 0.0 to 1.0 chance of branching at each level.
+%
+%   WideBranches: 1/4 of the time when branching happens it will create
+%                 wide branches, this specifies the width of those branches.
+%
+% Example usage: revtree_generate(25, 0.25, 10, os:timestamp())
+
+revtree_generate(Depth, BranchChance, WideBranches, Seed) ->
+    rand:seed(exrop, Seed),
+    Rev = random_rev(),
+    {Seed, [{1, revnode(Rev, Depth, BranchChance, WideBranches)}]}.
+
+% Get all the revisions in the tree as a sorted [{Pos, Rev} ...] list
+%
+revtree_get_revs([{Pos, {_, _, _} = Node}]) when is_integer(Pos) ->
+    lists:sort(maps:keys(revs1(Pos, Node))).
+
+revnode(Rev, Depth, _, _) when Depth =< 0 ->
+    {Rev, x, []};
+revnode(Rev, Depth, BranchChance, WideBranches) ->
+    Choice = rand:uniform(),
+    {Revs, Depth1} =
+        if
+            Choice < BranchChance / 4 ->
+                {childrev(WideBranches), trunc(Depth / 2)};
+            Choice < BranchChance ->
+                {childrev(2), trunc(Depth / 2)};
+            true ->
+                {childrev(1), Depth - 1}
+        end,
+    {Rev, x, [revnode(R, Depth1, BranchChance, WideBranches) || R <- Revs]}.
+
+childrev(N) ->
+    lists:sort([random_rev() || _ <- lists:seq(1, N)]).
+
+revs1(Pos, {Rev, _Val, []}) ->
+    #{{Pos, Rev} => true};
+revs1(Pos, {Rev, _Val, Nodes}) ->
+    lists:foldl(
+        fun(N, Acc) ->
+            maps:merge(Acc, revs1(Pos + 1, N))
+        end,
+        #{{Pos, Rev} => true},
+        Nodes
+    ).
+
+random_rev() ->
+    couch_util:to_hex_bin(crypto:strong_rand_bytes(16)).
+
+shuffle(List) ->
+    Paired = [{couch_rand:uniform(), I} || I <- List],
+    Sorted = lists:sort(Paired),
+    [I || {_, I} <- Sorted].

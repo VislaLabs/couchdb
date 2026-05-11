@@ -13,10 +13,6 @@
 -module(couch_replicator_connection_tests).
 
 -include_lib("couch/include/couch_eunit.hrl").
--include_lib("couch/include/couch_db.hrl").
-
--define(TIMEOUT, 1000).
-
 
 setup() ->
     Host = config:get("httpd", "bind_address", "127.0.0.1"),
@@ -26,178 +22,163 @@ setup() ->
 teardown(_) ->
     ok.
 
-
 httpc_pool_test_() ->
     {
         "replicator connection sharing tests",
         {
             setup,
-            fun() -> test_util:start_couch([couch_replicator]) end, fun test_util:stop_couch/1,
+            fun() -> test_util:start_couch([couch_replicator]) end,
+            fun test_util:stop_couch/1,
             {
                 foreach,
-                fun setup/0, fun teardown/1,
+                fun setup/0,
+                fun teardown/1,
                 [
-                    fun connections_shared_after_release/1,
-                    fun connections_not_shared_after_owner_death/1,
-                    fun idle_connections_closed/1,
-                    fun test_owner_monitors/1,
-                    fun worker_discards_creds_on_create/1,
-                    fun worker_discards_url_creds_after_request/1,
-                    fun worker_discards_creds_in_headers_after_request/1,
-                    fun worker_discards_proxy_creds_after_request/1
+                    ?TDEF_FE(connections_shared_after_release),
+                    ?TDEF_FE(connections_not_shared_after_owner_death),
+                    ?TDEF_FE(idle_connections_closed),
+                    ?TDEF_FE(test_owner_monitors),
+                    ?TDEF_FE(worker_discards_creds_on_create),
+                    ?TDEF_FE(worker_discards_url_creds_after_request),
+                    ?TDEF_FE(worker_discards_creds_in_headers_after_request),
+                    ?TDEF_FE(worker_discards_proxy_creds_after_request)
                 ]
             }
         }
     }.
 
-
 connections_shared_after_release({Host, Port}) ->
-    ?_test(begin
-        URL = "http://" ++ Host ++ ":" ++ Port,
-        Self = self(),
-        {ok, Pid} = couch_replicator_connection:acquire(URL),
-        couch_replicator_connection:release(Pid),
-        spawn(fun() ->
-            Self ! couch_replicator_connection:acquire(URL)
-        end),
-        receive
-            {ok, Pid2} ->
-                ?assertEqual(Pid, Pid2)
-        end
-    end).
-
+    URL = "http://" ++ Host ++ ":" ++ Port,
+    Self = self(),
+    {ok, Pid} = couch_replicator_connection:acquire(URL),
+    couch_replicator_connection:release(Pid),
+    spawn(fun() ->
+        Self ! couch_replicator_connection:acquire(URL)
+    end),
+    receive
+        {ok, Pid2} ->
+            ?assertEqual(Pid, Pid2)
+    end.
 
 connections_not_shared_after_owner_death({Host, Port}) ->
-    ?_test(begin
-        URL = "http://" ++ Host ++ ":" ++ Port,
-        Self = self(),
-        spawn(fun() ->
-            Self ! couch_replicator_connection:acquire(URL),
-            error("simulate division by zero without compiler warning")
-        end),
-        receive
-            {ok, Pid} ->
-                {ok, Pid2} = couch_replicator_connection:acquire(URL),
-                ?assertNotEqual(Pid, Pid2),
-                MRef = monitor(process, Pid),
-                receive {'DOWN', MRef, process, Pid, _Reason} ->
+    URL = "http://" ++ Host ++ ":" ++ Port,
+    Self = self(),
+    spawn(fun() ->
+        Self ! couch_replicator_connection:acquire(URL),
+        error("simulate division by zero without compiler warning")
+    end),
+    receive
+        {ok, Pid} ->
+            {ok, Pid2} = couch_replicator_connection:acquire(URL),
+            ?assertNotEqual(Pid, Pid2),
+            MRef = monitor(process, Pid),
+            receive
+                {'DOWN', MRef, process, Pid, _Reason} ->
                     ?assert(not is_process_alive(Pid));
-                    Other -> throw(Other)
-                end
-        end
-    end).
-
+                Other ->
+                    throw(Other)
+            end
+    end.
 
 idle_connections_closed({Host, Port}) ->
-    ?_test(begin
-        URL = "http://" ++ Host ++ ":" ++ Port,
-        {ok, Pid} = couch_replicator_connection:acquire(URL),
-        couch_replicator_connection ! close_idle_connections,
-        ?assert(ets:member(couch_replicator_connection, Pid)),
-        % block until idle connections have closed
-        sys:get_status(couch_replicator_connection),
-        couch_replicator_connection:release(Pid),
-        couch_replicator_connection ! close_idle_connections,
-        % block until idle connections have closed
-        sys:get_status(couch_replicator_connection),
-        ?assert(not ets:member(couch_replicator_connection, Pid))
-    end).
-
+    URL = "http://" ++ Host ++ ":" ++ Port,
+    {ok, Pid} = couch_replicator_connection:acquire(URL),
+    couch_replicator_connection ! close_idle_connections,
+    ?assert(ets:member(couch_replicator_connection, Pid)),
+    % block until idle connections have closed
+    sys:get_status(couch_replicator_connection),
+    couch_replicator_connection:release(Pid),
+    couch_replicator_connection ! close_idle_connections,
+    % block until idle connections have closed
+    sys:get_status(couch_replicator_connection),
+    ?assert(not ets:member(couch_replicator_connection, Pid)).
 
 test_owner_monitors({Host, Port}) ->
-    ?_test(begin
-        URL = "http://" ++ Host ++ ":" ++ Port,
-        {ok, Worker0} = couch_replicator_connection:acquire(URL),
-        assert_monitors_equal([{process, self()}]),
-        couch_replicator_connection:release(Worker0),
-        assert_monitors_equal([]),
-        {Workers, Monitors}  = lists:foldl(fun(_, {WAcc, MAcc}) ->
+    URL = "http://" ++ Host ++ ":" ++ Port,
+    {ok, Worker0} = couch_replicator_connection:acquire(URL),
+    assert_monitors_equal([{process, self()}]),
+    couch_replicator_connection:release(Worker0),
+    assert_monitors_equal([]),
+    {Workers, Monitors} = lists:foldl(
+        fun(_, {WAcc, MAcc}) ->
             {ok, Worker1} = couch_replicator_connection:acquire(URL),
             MAcc1 = [{process, self()} | MAcc],
             assert_monitors_equal(MAcc1),
             {[Worker1 | WAcc], MAcc1}
-        end, {[], []}, lists:seq(1,5)),
-        lists:foldl(fun(Worker2, Acc) ->
+        end,
+        {[], []},
+        lists:seq(1, 5)
+    ),
+    lists:foldl(
+        fun(Worker2, Acc) ->
             [_ | NewAcc] = Acc,
             couch_replicator_connection:release(Worker2),
             assert_monitors_equal(NewAcc),
             NewAcc
-        end, Monitors, Workers)
-    end).
-
+        end,
+        Monitors,
+        Workers
+    ).
 
 worker_discards_creds_on_create({Host, Port}) ->
-    ?_test(begin
-        {User, Pass, B64Auth} = user_pass(),
-        URL = "http://" ++ User ++ ":" ++ Pass ++ "@" ++ Host ++ ":" ++ Port,
-        {ok, WPid} = couch_replicator_connection:acquire(URL),
-        Internals = worker_internals(WPid),
-        ?assert(string:str(Internals, B64Auth) =:= 0),
-        ?assert(string:str(Internals, Pass) =:= 0)
-    end).
-
+    {User, Pass, B64Auth} = user_pass(),
+    URL = "http://" ++ User ++ ":" ++ Pass ++ "@" ++ Host ++ ":" ++ Port,
+    {ok, WPid} = couch_replicator_connection:acquire(URL),
+    Internals = worker_internals(WPid),
+    ?assert(string:str(Internals, B64Auth) =:= 0),
+    ?assert(string:str(Internals, Pass) =:= 0).
 
 worker_discards_url_creds_after_request({Host, _}) ->
-    ?_test(begin
-       {User, Pass, B64Auth} = user_pass(),
-       {Port, ServerPid} = server(),
-       PortStr = integer_to_list(Port),
-       URL = "http://" ++ User ++ ":" ++ Pass ++ "@" ++ Host ++ ":" ++ PortStr,
-       {ok, WPid} = couch_replicator_connection:acquire(URL),
-       ?assertMatch({ok, "200", _, _}, send_req(WPid, URL, [], [])),
-       Internals = worker_internals(WPid),
-       ?assert(string:str(Internals, B64Auth) =:= 0),
-       ?assert(string:str(Internals, Pass) =:= 0),
-       couch_replicator_connection:release(WPid),
-       unlink(ServerPid),
-       exit(ServerPid, kill)
-    end).
-
+    {User, Pass, B64Auth} = user_pass(),
+    {Port, ServerPid} = server(),
+    PortStr = integer_to_list(Port),
+    URL = "http://" ++ User ++ ":" ++ Pass ++ "@" ++ Host ++ ":" ++ PortStr,
+    {ok, WPid} = couch_replicator_connection:acquire(URL),
+    ?assertMatch({ok, "200", _, _}, send_req(WPid, URL, [], [])),
+    Internals = worker_internals(WPid),
+    ?assert(string:str(Internals, B64Auth) =:= 0),
+    ?assert(string:str(Internals, Pass) =:= 0),
+    couch_replicator_connection:release(WPid),
+    unlink(ServerPid),
+    exit(ServerPid, kill).
 
 worker_discards_creds_in_headers_after_request({Host, _}) ->
-    ?_test(begin
-       {_User, Pass, B64Auth} = user_pass(),
-       {Port, ServerPid} = server(),
-       PortStr = integer_to_list(Port),
-       URL = "http://" ++ Host ++ ":" ++ PortStr,
-       {ok, WPid} = couch_replicator_connection:acquire(URL),
-       Headers = [{"Authorization", "Basic " ++ B64Auth}],
-       ?assertMatch({ok, "200", _, _}, send_req(WPid, URL, Headers, [])),
-       Internals = worker_internals(WPid),
-       ?assert(string:str(Internals, B64Auth) =:= 0),
-       ?assert(string:str(Internals, Pass) =:= 0),
-       couch_replicator_connection:release(WPid),
-       unlink(ServerPid),
-       exit(ServerPid, kill)
-    end).
-
+    {_User, Pass, B64Auth} = user_pass(),
+    {Port, ServerPid} = server(),
+    PortStr = integer_to_list(Port),
+    URL = "http://" ++ Host ++ ":" ++ PortStr,
+    {ok, WPid} = couch_replicator_connection:acquire(URL),
+    Headers = [{"Authorization", "Basic " ++ B64Auth}],
+    ?assertMatch({ok, "200", _, _}, send_req(WPid, URL, Headers, [])),
+    Internals = worker_internals(WPid),
+    ?assert(string:str(Internals, B64Auth) =:= 0),
+    ?assert(string:str(Internals, Pass) =:= 0),
+    couch_replicator_connection:release(WPid),
+    unlink(ServerPid),
+    exit(ServerPid, kill).
 
 worker_discards_proxy_creds_after_request({Host, _}) ->
-    ?_test(begin
-       {User, Pass, B64Auth} = user_pass(),
-       {Port, ServerPid} = server(),
-       PortStr = integer_to_list(Port),
-       URL = "http://" ++ Host ++ ":" ++ PortStr,
-       {ok, WPid} = couch_replicator_connection:acquire(URL),
-       Opts = [
-           {proxy_host, Host},
-           {proxy_port, Port},
-           {proxy_user, User},
-           {proxy_pass, Pass}
-       ],
-       ?assertMatch({ok, "200", _, _}, send_req(WPid, URL, [], Opts)),
-       Internals = worker_internals(WPid),
-       ?assert(string:str(Internals, B64Auth) =:= 0),
-       ?assert(string:str(Internals, Pass) =:= 0),
-       couch_replicator_connection:release(WPid),
-       unlink(ServerPid),
-       exit(ServerPid, kill)
-    end).
-
+    {User, Pass, B64Auth} = user_pass(),
+    {Port, ServerPid} = server(),
+    PortStr = integer_to_list(Port),
+    URL = "http://" ++ Host ++ ":" ++ PortStr,
+    {ok, WPid} = couch_replicator_connection:acquire(URL),
+    Opts = [
+        {proxy_host, Host},
+        {proxy_port, Port},
+        {proxy_user, User},
+        {proxy_pass, Pass}
+    ],
+    ?assertMatch({ok, "200", _, _}, send_req(WPid, URL, [], Opts)),
+    Internals = worker_internals(WPid),
+    ?assert(string:str(Internals, B64Auth) =:= 0),
+    ?assert(string:str(Internals, Pass) =:= 0),
+    couch_replicator_connection:release(WPid),
+    unlink(ServerPid),
+    exit(ServerPid, kill).
 
 send_req(WPid, URL, Headers, Opts) ->
     ibrowse:send_req_direct(WPid, URL, Headers, get, [], Opts).
-
 
 user_pass() ->
     User = "specialuser",
@@ -205,19 +186,16 @@ user_pass() ->
     B64Auth = ibrowse_lib:encode_base64(User ++ ":" ++ Pass),
     {User, Pass, B64Auth}.
 
-
 worker_internals(Pid) ->
     Dict = io_lib:format("~p", [erlang:process_info(Pid, dictionary)]),
     State = io_lib:format("~p", [sys:get_state(Pid)]),
     lists:flatten([Dict, State]).
-
 
 server() ->
     {ok, LSock} = gen_tcp:listen(0, [{recbuf, 256}, {active, false}]),
     {ok, LPort} = inet:port(LSock),
     SPid = spawn_link(fun() -> server_responder(LSock) end),
     {LPort, SPid}.
-
 
 server_responder(LSock) ->
     {ok, Sock} = gen_tcp:accept(LSock),
@@ -233,7 +211,6 @@ server_responder(LSock) ->
             throw({replication_eunit_tcp_server_crashed, Other})
     end,
     server_responder(LSock).
-
 
 assert_monitors_equal(ShouldBe) ->
     sys:get_status(couch_replicator_connection),

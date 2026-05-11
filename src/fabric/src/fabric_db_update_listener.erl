@@ -12,7 +12,7 @@
 
 -module(fabric_db_update_listener).
 
--export([go/4, start_update_notifier/1, stop/1, wait_db_updated/1]).
+-export([go/5, start_update_notifier/1, stop/1, wait_db_updated/1]).
 -export([handle_db_event/3]).
 
 -include_lib("fabric/include/fabric.hrl").
@@ -36,27 +36,28 @@
     shards
 }).
 
-go(Parent, ParentRef, DbName, Timeout) ->
+go(Parent, ParentRef, DbName, Timeout, ClientReq) ->
     Shards = mem3:shards(DbName),
     Notifiers = start_update_notifiers(Shards),
     MonRefs = lists:usort([rexi_utils:server_pid(N) || #worker{node = N} <- Notifiers]),
     RexiMon = rexi_monitor:start(MonRefs),
-    MonPid = start_cleanup_monitor(self(), Notifiers),
+    MonPid = start_cleanup_monitor(self(), Notifiers, ClientReq),
     %% This is not a common pattern for rexi but to enable the calling
     %% process to communicate via handle_message/3 we "fake" it as a
     %% a spawned worker.
-    Workers = [#worker{ref=ParentRef, pid=Parent} | Notifiers],
+    Workers = [#worker{ref = ParentRef, pid = Parent} | Notifiers],
     Acc = #acc{
         parent = Parent,
         state = unset,
         shards = Shards
     },
-    Resp = try
-        receive_results(Workers, Acc, Timeout)
-    after
-        rexi_monitor:stop(RexiMon),
-        stop_cleanup_monitor(MonPid)
-    end,
+    Resp =
+        try
+            receive_results(Workers, Acc, Timeout)
+        after
+            rexi_monitor:stop(RexiMon),
+            stop_cleanup_monitor(MonPid)
+        end,
     case Resp of
         {ok, _} -> ok;
         {error, Error} -> erlang:error(Error);
@@ -64,13 +65,20 @@ go(Parent, ParentRef, DbName, Timeout) ->
     end.
 
 start_update_notifiers(Shards) ->
-    EndPointDict = lists:foldl(fun(#shard{node=Node, name=Name}, Acc) ->
-        dict:append(Node, Name, Acc)
-    end, dict:new(), Shards),
-    lists:map(fun({Node, DbNames}) ->
-        Ref = rexi:cast(Node, {?MODULE, start_update_notifier, [DbNames]}),
-        #worker{ref=Ref, node=Node}
-    end, dict:to_list(EndPointDict)).
+    EndPointDict = lists:foldl(
+        fun(#shard{node = Node, name = Name}, Acc) ->
+            dict:append(Node, Name, Acc)
+        end,
+        dict:new(),
+        Shards
+    ),
+    lists:map(
+        fun({Node, DbNames}) ->
+            Ref = rexi:cast(Node, {?MODULE, start_update_notifier, [DbNames]}),
+            #worker{ref = Ref, node = Node}
+        end,
+        dict:to_list(EndPointDict)
+    ).
 
 % rexi endpoint
 start_update_notifier(DbNames) ->
@@ -89,16 +97,17 @@ handle_db_event(_DbName, deleted, St) ->
 handle_db_event(_DbName, _Event, St) ->
     {ok, St}.
 
-start_cleanup_monitor(Parent, Notifiers) ->
+start_cleanup_monitor(Parent, Notifiers, ClientReq) ->
     spawn(fun() ->
         Ref = erlang:monitor(process, Parent),
-        cleanup_monitor(Parent, Ref, Notifiers)
+        cleanup_monitor(Parent, Ref, Notifiers, ClientReq)
     end).
 
 stop_cleanup_monitor(MonPid) ->
     MonPid ! {self(), stop}.
 
-cleanup_monitor(Parent, Ref, Notifiers) ->
+cleanup_monitor(Parent, Ref, Notifiers, ClientReq) ->
+    CheckMSec = chttpd_util:mochiweb_client_req_check_msec(),
     receive
         {'DOWN', Ref, _, _, _} ->
             stop_update_notifiers(Notifiers);
@@ -108,6 +117,9 @@ cleanup_monitor(Parent, Ref, Notifiers) ->
             couch_log:error("Unkown message in ~w :: ~w", [?MODULE, Else]),
             stop_update_notifiers(Notifiers),
             exit(Parent, {unknown_message, Else})
+    after CheckMSec ->
+        chttpd_util:stop_client_process_if_disconnected(Parent, ClientReq),
+        cleanup_monitor(Parent, Ref, Notifiers, ClientReq)
     end.
 
 stop_update_notifiers(Notifiers) ->
@@ -132,17 +144,16 @@ wait_db_updated({Pid, Ref}) ->
 receive_results(Workers, Acc0, Timeout) ->
     Fun = fun handle_message/3,
     case rexi_utils:recv(Workers, #worker.ref, Fun, Acc0, infinity, Timeout) of
-    {timeout, #acc{state=updated}=Acc} ->
-        receive_results(Workers, Acc, Timeout);
-    {timeout, #acc{state=waiting}=Acc} ->
-        erlang:send(Acc#acc.parent, {state, self(), timeout}),
-        receive_results(Workers, Acc#acc{state=unset}, Timeout);
-    {timeout, Acc} ->
-        receive_results(Workers, Acc#acc{state=timeout}, Timeout);
-    {_, Acc} ->
-        {ok, Acc}
+        {timeout, #acc{state = updated} = Acc} ->
+            receive_results(Workers, Acc, Timeout);
+        {timeout, #acc{state = waiting} = Acc} ->
+            erlang:send(Acc#acc.parent, {state, self(), timeout}),
+            receive_results(Workers, Acc#acc{state = unset}, Timeout);
+        {timeout, Acc} ->
+            receive_results(Workers, Acc#acc{state = timeout}, Timeout);
+        {_, Acc} ->
+            {ok, Acc}
     end.
-
 
 handle_message({rexi_DOWN, _, {_, Node}, _}, _Worker, Acc) ->
     handle_error(Node, {nodedown, Node}, Acc);
@@ -150,22 +161,21 @@ handle_message({rexi_EXIT, _Reason}, Worker, Acc) ->
     handle_error(Worker#worker.node, {worker_exit, Worker}, Acc);
 handle_message({gen_event_EXIT, Node, Reason}, _Worker, Acc) ->
     handle_error(Node, {gen_event_EXIT, Node, Reason}, Acc);
-handle_message(db_updated, _Worker, #acc{state=waiting}=Acc) ->
+handle_message(db_updated, _Worker, #acc{state = waiting} = Acc) ->
     % propagate message to calling controller
     erlang:send(Acc#acc.parent, {state, self(), updated}),
-    {ok, Acc#acc{state=unset}};
+    {ok, Acc#acc{state = unset}};
 handle_message(db_updated, _Worker, Acc) ->
-    {ok, Acc#acc{state=updated}};
+    {ok, Acc#acc{state = updated}};
 handle_message(db_deleted, _Worker, _Acc) ->
     {stop, ok};
-handle_message(get_state, _Worker, #acc{state=unset}=Acc) ->
-    {ok, Acc#acc{state=waiting}};
+handle_message(get_state, _Worker, #acc{state = unset} = Acc) ->
+    {ok, Acc#acc{state = waiting}};
 handle_message(get_state, _Worker, Acc) ->
     erlang:send(Acc#acc.parent, {state, self(), Acc#acc.state}),
-    {ok, Acc#acc{state=unset}};
+    {ok, Acc#acc{state = unset}};
 handle_message(done, _, _) ->
     {stop, ok}.
-
 
 handle_error(Node, Reason, #acc{shards = Shards} = Acc) ->
     Rest = lists:filter(fun(#shard{node = N}) -> N /= Node end, Shards),

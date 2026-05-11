@@ -21,14 +21,16 @@ init(_Args) ->
     Children = [
         child(mem3_events),
         child(mem3_nodes),
+        child(mem3_distribution),
         child(mem3_seeds),
-        child(mem3_sync_nodes), % Order important?
+        % Order important?
+        child(mem3_sync_nodes),
         child(mem3_sync),
         child(mem3_shards),
         child(mem3_sync_event_listener),
         child(mem3_reshard_sup)
     ],
-    {ok, {{one_for_one,10,1}, couch_epi:register_service(mem3_epi, Children)}}.
+    {ok, {{one_for_one, 10, 1}, couch_epi:register_service(mem3_epi, Children)}}.
 
 child(mem3_events) ->
     MFA = {gen_event, start_link, [{local, mem3_events}]},

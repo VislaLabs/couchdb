@@ -13,16 +13,13 @@
 -module(ddoc_cache_sup).
 -behaviour(supervisor).
 
-
 -export([
     start_link/0,
     init/1
 ]).
 
-
 start_link() ->
     supervisor:start_link({local, ?MODULE}, ?MODULE, []).
-
 
 init([]) ->
     Children = [
@@ -33,14 +30,6 @@ init([]) ->
             5000,
             worker,
             [ddoc_cache_lru]
-        },
-        {
-            ddoc_cache_opener,
-            {ddoc_cache_opener, start_link, []},
-            permanent,
-            5000,
-            worker,
-            [ddoc_cache_opener]
         }
     ],
     {ok, {{one_for_one, 25, 1}, Children}}.

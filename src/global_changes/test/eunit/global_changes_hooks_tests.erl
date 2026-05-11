@@ -12,10 +12,10 @@
 
 -module(global_changes_hooks_tests).
 
+-export([allowed_owner/2]).
+
 -include_lib("couch/include/couch_eunit.hrl").
 -include_lib("couch/include/couch_db.hrl").
-
--export([allowed_owner/2]).
 
 -define(t2l(V), lists:flatten(io_lib:format("~p", [V]))).
 
@@ -34,12 +34,16 @@ stop({Ctx, DbName}) ->
 setup(default) ->
     add_admin("admin", <<"pass">>),
     config:delete("chttpd_auth", "authentication_redirect", false),
-    config:set("chttpd_auth", "require_valid_user", "false", false),
+    config:set("chttpd", "require_valid_user", "false", false),
     get_host();
 setup(A) ->
     Host = setup(default),
-    ok = config:set("global_changes", "allowed_owner",
-        ?t2l({?MODULE, allowed_owner, A}), false),
+    ok = config:set(
+        "global_changes",
+        "allowed_owner",
+        ?t2l({?MODULE, allowed_owner, A}),
+        false
+    ),
     Host.
 
 teardown(_) ->
@@ -57,7 +61,8 @@ allowed_owner_hook_test_() ->
         "Check allowed_owner hook",
         {
             setup,
-            fun start/0, fun stop/1,
+            fun start/0,
+            fun stop/1,
             [
                 disabled_allowed_owner_integration_point(),
                 enabled_allowed_owner_integration_point()
@@ -70,11 +75,12 @@ disabled_allowed_owner_integration_point() ->
         "disabled allowed_owner integration point",
         {
             foreach,
-            fun() -> setup(default) end, fun teardown/1,
+            fun() -> setup(default) end,
+            fun teardown/1,
             [
                 fun should_not_fail_for_admin/1,
                 fun should_fail_for_non_admin/1
-             ]
+            ]
         }
     }.
 
@@ -84,12 +90,14 @@ enabled_allowed_owner_integration_point() ->
         [
             {
                 foreach,
-                fun() -> setup("throw") end, fun teardown/1,
+                fun() -> setup("throw") end,
+                fun teardown/1,
                 [fun should_throw/1]
             },
             {
                 foreach,
-                fun() -> setup("pass") end, fun teardown/1,
+                fun() -> setup("pass") end,
+                fun teardown/1,
                 [fun should_pass/1]
             }
         ]

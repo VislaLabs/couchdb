@@ -17,6 +17,7 @@
 include version.mk
 
 REBAR?=$(shell echo `pwd`/bin/rebar)
+ERLFMT?=$(shell echo `pwd`/bin/erlfmt)
 
 # Handle the following scenarios:
 #   1. When building from a tarball, use version.mk.
@@ -117,7 +118,7 @@ help:
 
 
 .PHONY: couch
-# target: couch - Build CouchDB core, use ERL_OPTS to provide custom compiler's options
+# target: couch - Build CouchDB core, use ERL_COMPILER_OPTIONS to provide custom compiler's options
 couch: config.erl
 	@COUCHDB_VERSION=$(COUCHDB_VERSION) COUCHDB_GIT_SHA=$(COUCHDB_GIT_SHA) $(REBAR) compile $(COMPILE_OPTS)
 	@cp src/couch/priv/couchjs bin/
@@ -150,7 +151,8 @@ escriptize: couch
 
 .PHONY: check
 # target: check - Test everything
-check: all python-black
+check: all
+	@$(MAKE) exunit
 	@$(MAKE) eunit
 	@$(MAKE) mango-test
 	@$(MAKE) elixir-suite
@@ -182,7 +184,8 @@ exunit: export MIX_ENV=test
 exunit: export ERL_LIBS = $(shell pwd)/src
 exunit: export ERL_AFLAGS = -config $(shell pwd)/rel/files/eunit.config
 exunit: export COUCHDB_QUERY_SERVER_JAVASCRIPT = $(shell pwd)/bin/couchjs $(shell pwd)/share/server/main.js
-exunit: couch elixir-init setup-eunit elixir-check-formatted elixir-credo
+exunit: export COUCHDB_TEST_ADMIN_PARTY_OVERRIDE=1
+exunit: couch elixir-init setup-eunit
 	@mix test --trace $(EXUNIT_OPTS)
 
 setup-eunit: export BUILDDIR = $(shell pwd)
@@ -202,6 +205,12 @@ soak-eunit: couch
 	@$(REBAR) setup_eunit 2> /dev/null
 	while [ $$? -eq 0 ] ; do $(REBAR) -r eunit $(EUNIT_OPTS) ; done
 
+erlfmt-check:
+	ERLFMT_PATH=$(ERLFMT) python3 dev/format_check.py
+
+erlfmt-format:
+	ERLFMT_PATH=$(ERLFMT) python3 dev/format_all.py
+
 .venv/bin/black:
 	@python3 -m venv .venv
 	@.venv/bin/pip3 install black || touch .venv/bin/black
@@ -212,8 +221,8 @@ python-black: .venv/bin/black
 	       echo "Python formatter not supported on Python < 3.6; check results on a newer platform"
 	@python3 -c "import sys; exit(1 if sys.version_info >= (3,6) else 0)" || \
 		LC_ALL=C.UTF-8 LANG=C.UTF-8 .venv/bin/black --check \
-		--exclude="build/|buck-out/|dist/|_build/|\.git/|\.hg/|\.mypy_cache/|\.nox/|\.tox/|\.venv/|src/rebar/pr2relnotes.py|src/fauxton" \
-		build-aux/*.py dev/run src/mango/test/*.py src/docs/src/conf.py src/docs/ext/*.py .
+		--exclude="build/|buck-out/|dist/|_build/|\.git/|\.hg/|\.mypy_cache/|\.nox/|\.tox/|\.venv/|src/erlfmt|src/jiffy|src/rebar/pr2relnotes.py|src/fauxton" \
+		build-aux/*.py dev/run dev/format_*.py src/mango/test/*.py src/docs/src/conf.py src/docs/ext/*.py .
 
 python-black-update: .venv/bin/black
 	@python3 -c "import sys; exit(1 if sys.version_info < (3,6) else 0)" || \
@@ -226,27 +235,27 @@ python-black-update: .venv/bin/black
 .PHONY: elixir
 elixir: export MIX_ENV=integration
 elixir: export COUCHDB_TEST_ADMIN_PARTY_OVERRIDE=1
-elixir: elixir-init elixir-check-formatted elixir-credo devclean
+elixir: elixir-init devclean
 	@dev/run "$(TEST_OPTS)" -a adm:pass -n 1 \
 		--enable-erlang-views \
 		--locald-config test/elixir/test/config/test-config.ini \
 		--no-eval 'mix test --trace --exclude without_quorum_test --exclude with_quorum_test $(EXUNIT_OPTS)'
 
 .PHONY: elixir-init
-elixir-init: MIX_ENV=test
+elixir-init: MIX_ENV=integration
 elixir-init: config.erl
-	@mix local.rebar --force && mix local.hex --force && mix deps.get
+	@mix local.rebar --force rebar3 ./bin/rebar3 && mix local.hex --force && mix deps.get
 
 .PHONY: elixir-cluster-without-quorum
 elixir-cluster-without-quorum: export MIX_ENV=integration
-elixir-cluster-without-quorum: elixir-init elixir-check-formatted elixir-credo devclean
+elixir-cluster-without-quorum: elixir-init devclean
 	@dev/run -n 3 -q -a adm:pass \
 		--degrade-cluster 2 \
 		--no-eval 'mix test --trace --only without_quorum_test $(EXUNIT_OPTS)'
 
 .PHONY: elixir-cluster-with-quorum
 elixir-cluster-with-quorum: export MIX_ENV=integration
-elixir-cluster-with-quorum: elixir-init elixir-check-formatted elixir-credo devclean
+elixir-cluster-with-quorum: elixir-init devclean
 	@dev/run -n 3 -q -a adm:pass \
 		--degrade-cluster 1 \
 		--no-eval 'mix test --trace --only with_quorum_test $(EXUNIT_OPTS)'
@@ -254,7 +263,7 @@ elixir-cluster-with-quorum: elixir-init elixir-check-formatted elixir-credo devc
 .PHONY: elixir-suite
 elixir-suite: export MIX_ENV=integration
 elixir-suite: export COUCHDB_TEST_ADMIN_PARTY_OVERRIDE=1
-elixir-suite: elixir-init elixir-check-formatted elixir-credo devclean
+elixir-suite: elixir-init devclean
 	@dev/run -n 1 -q -a adm:pass \
 		--enable-erlang-views \
 		--no-join \
@@ -262,21 +271,17 @@ elixir-suite: elixir-init elixir-check-formatted elixir-credo devclean
 		--erlang-config rel/files/eunit.config \
 		--no-eval 'mix test --trace --include test/elixir/test/config/suite.elixir --exclude test/elixir/test/config/skip.elixir'
 
-.PHONY: elixir-check-formatted
-elixir-check-formatted: elixir-init
+.PHONY: elixir-source-checks
+elixir-source-checks: export MIX_ENV=integration
+elixir-source-checks: elixir-init
 	@mix format --check-formatted
-
-# Credo is a static code analysis tool for Elixir.
-# We use it in our tests
-.PHONY: elixir-credo
-elixir-credo: elixir-init
 	@mix credo
 
 .PHONY: build-report
 # target: build-report - Generate and upload a build report
 build-report:
 	build-aux/show-test-results.py --suites=10 --tests=10 > test-results.log
-	build-aux/logfile-uploader.py
+	#build-aux/logfile-uploader.py
 
 .PHONY: check-qs
 # target: check-qs - Run query server tests (ruby and rspec required!)
@@ -313,7 +318,7 @@ mango-test: devclean all
 	@cd src/mango && \
 		python3 -m venv .venv && \
 		.venv/bin/python3 -m pip install -r requirements.txt
-	@cd src/mango && ../../dev/run "$(TEST_OPTS)" -n 1 --admin=testuser:testpass '.venv/bin/python3 -m nose --with-xunit'
+	@cd src/mango && ../../dev/run "$(TEST_OPTS)" -n 1 --admin=testuser:testpass '.venv/bin/python3 -m nose2'
 
 
 .PHONY: weatherreport-test
@@ -344,6 +349,11 @@ check-plt:
 dialyze: .rebar
 	@$(REBAR) -r dialyze $(DIALYZE_OPTS)
 
+
+.PHONY: find_bugs
+# target: xref - find unused exports etc
+find_bugs:
+	@$(REBAR) --keep-going --recursive xref $(DIALYZE_OPTS)
 
 .PHONY: introspect
 # target: introspect - Check for commits difference between rebar.config and repository
@@ -433,7 +443,7 @@ clean:
 	@rm -rf src/*/.rebar
 	@rm -rf src/*/priv/*.so
 	@rm -rf src/couch/priv/{couchspawnkillable,couchjs}
-	@rm -rf share/server/main.js share/server/main-coffee.js
+	@rm -rf share/server/main.js share/server/main-ast-bypass.js share/server/main-coffee.js
 	@rm -rf tmp dev/data dev/lib dev/logs
 	@rm -rf src/mango/.venv
 	@rm -f src/couch/priv/couchspawnkillable
@@ -479,7 +489,7 @@ config.erl:
 
 src/docs/build:
 ifeq ($(with_docs), 1)
-	@cd src/docs; $(MAKE)
+	@cd src/docs; ./setup.sh ; $(MAKE)
 endif
 
 

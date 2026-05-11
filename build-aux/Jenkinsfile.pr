@@ -13,17 +13,19 @@
 // License for the specific language governing permissions and limitations under
 // the License.
 build_and_test = '''
-mkdir -p ${COUCHDB_IO_LOG_DIR} ${ERLANG_VERSION}
+mkdir -p ${ERLANG_VERSION}
 cd ${ERLANG_VERSION}
 rm -rf build
 mkdir build
 cd build
 tar -xf ${WORKSPACE}/apache-couchdb-*.tar.gz
 cd apache-couchdb-*
-. /usr/local/kerl/${ERLANG_VERSION}/activate
-./configure --spidermonkey-version 60
+./configure
 make check || (make build-report && false)
 '''
+
+docs_changed = "git diff --name-only origin/${env.CHANGE_TARGET} | grep -q '^src/docs/'"
+other_changes = "git diff --name-only origin/${env.CHANGE_TARGET} | grep -q -v '^src/docs/'"
 
 pipeline {
 
@@ -31,15 +33,13 @@ pipeline {
   agent none
 
   environment {
-    COUCHAUTH = credentials('couchdb_vm2_couchdb')
     recipient = 'notifications@couchdb.apache.org'
-    COUCHDB_IO_LOG_DIR = '/tmp/couchjslogs'
     // Following fix an issue with git <= 2.6.5 where no committer
     // name or email are present for reflog, required for git clone
     GIT_COMMITTER_NAME = 'Jenkins User'
     GIT_COMMITTER_EMAIL = 'couchdb@apache.org'
     // Parameters for the matrix build
-    DOCKER_IMAGE = 'apache/couchdbci-debian:buster-erlang-all'
+    DOCKER_IMAGE_BASE = 'apache/couchdbci-debian:bullseye-erlang'
     // https://github.com/jenkins-infra/jenkins.io/blob/master/Jenkinsfile#64
     // We need the jenkins user mapped inside of the image
     // npm config cache below deals with /home/jenkins not mapping correctly
@@ -50,7 +50,7 @@ pipeline {
     // Search for ERLANG_VERSION
     // see https://issues.jenkins.io/browse/JENKINS-61047 for why this cannot
     // be done parametrically
-    LOW_ERLANG_VER = '20.3.8.26'
+    LOW_ERLANG_VER = '24.3.4.14'
   }
 
   options {
@@ -63,10 +63,114 @@ pipeline {
   }
 
   stages {
-    stage('Build Release Tarball') {
+
+    stage('Setup Env') {
       agent {
         docker {
-          image "${DOCKER_IMAGE}"
+          image "${DOCKER_IMAGE_BASE}-${LOW_ERLANG_VER}"
+          label 'docker'
+          args "${DOCKER_ARGS}"
+          registryUrl 'https://docker.io/'
+          registryCredentialsId 'dockerhub_creds'
+        }
+      }
+      options {
+        timeout(time: 10, unit: 'MINUTES')
+      }
+      steps {
+        script {
+          env.DOCS_CHANGED = '0'
+          env.ONLY_DOCS_CHANGED = '0'
+          if ( sh(returnStatus: true, script: docs_changed) == 0 ) {
+            env.DOCS_CHANGED = '1'
+            if (sh(returnStatus: true, script: other_changes) == 1) {
+              env.ONLY_DOCS_CHANGED = '1'
+            }
+          }
+        }
+      }
+      post {
+        cleanup {
+          // UGH see https://issues.jenkins-ci.org/browse/JENKINS-41894
+          sh 'rm -rf ${WORKSPACE}/*'
+        }
+      }
+    } // stage 'Setup Environment'
+
+    stage('Docs Check') {
+      // Run docs `make check` stage if any docs changed
+      when {
+        beforeOptions true
+        expression { DOCS_CHANGED == '1' }
+      }
+      agent {
+        docker {
+          image "${DOCKER_IMAGE_BASE}-${LOW_ERLANG_VER}"
+          label 'docker'
+          args "${DOCKER_ARGS}"
+          registryUrl 'https://docker.io/'
+          registryCredentialsId 'dockerhub_creds'
+        }
+      }
+      options {
+        timeout(time: 15, unit: 'MINUTES')
+      }
+      steps {
+        sh '''
+          make python-black
+        '''
+        sh '''
+          (cd src/docs && make check)
+        '''
+      }
+      post {
+        cleanup {
+          // UGH see https://issues.jenkins-ci.org/browse/JENKINS-41894
+          sh 'rm -rf ${WORKSPACE}/*'
+        }
+      }
+    } // stage Docs Check
+
+    stage('Build Docs') {
+      // Build docs separately if only docs changed. If there are other changes, docs are
+      // already built as part of `make dist`
+      when {
+        beforeOptions true
+        expression { ONLY_DOCS_CHANGED == '1' }
+      }
+      agent {
+        docker {
+          image "${DOCKER_IMAGE_BASE}-${LOW_ERLANG_VER}"
+          label 'docker'
+          args "${DOCKER_ARGS}"
+          registryUrl 'https://docker.io/'
+          registryCredentialsId 'dockerhub_creds'
+        }
+      }
+      options {
+        timeout(time: 30, unit: 'MINUTES')
+      }
+      steps {
+        sh '''
+           (cd src/docs && ./setup.sh ; make html)
+         '''
+      }
+      post {
+        cleanup {
+          // UGH see https://issues.jenkins-ci.org/browse/JENKINS-41894
+          sh 'rm -rf ${WORKSPACE}/*'
+        }
+      }
+    } // stage Build Docs
+
+    stage('Source Format Checks') {
+      when {
+        beforeOptions true
+        expression { ONLY_DOCS_CHANGED == '0' }
+      }
+      agent {
+        docker {
+          image "${DOCKER_IMAGE_BASE}-${LOW_ERLANG_VER}"
           label 'docker'
           args "${DOCKER_ARGS}"
           registryUrl 'https://docker.io/'
@@ -78,10 +182,43 @@ pipeline {
       }
       steps {
         sh '''
-          set
           rm -rf apache-couchdb-*
-          . /usr/local/kerl/${LOW_ERLANG_VER}/activate
-          ./configure
+          ./configure --skip-deps --spidermonkey-version 78
+          make erlfmt-check
+          make elixir-source-checks
+          make python-black
+        '''
+      }
+      post {
+        cleanup {
+          // UGH see https://issues.jenkins-ci.org/browse/JENKINS-41894
+          sh 'rm -rf ${WORKSPACE}/*'
+        }
+      }
+    } // stage Erlfmt
+
+
+    stage('Make Dist') {
+      when {
+        beforeOptions true
+        expression { ONLY_DOCS_CHANGED == '0' }
+      }
+      agent {
+        docker {
+          image "${DOCKER_IMAGE_BASE}-${LOW_ERLANG_VER}"
+          label 'docker'
+          args "${DOCKER_ARGS}"
+          registryUrl 'https://docker.io/'
+          registryCredentialsId 'dockerhub_creds'
+        }
+      }
+      options {
+        timeout(time: 15, unit: "MINUTES")
+      }
+      steps {
+        sh '''
+          rm -rf apache-couchdb-*
+          ./configure --spidermonkey-version 78
           make dist
           chmod -R a+w * .
         '''
@@ -95,19 +232,26 @@ pipeline {
           sh 'rm -rf ${WORKSPACE}/*'
         }
       }
-    } // stage Build Release Tarball
+    } // stage Make Dist
 
     // TODO Rework once Improved Docker Pipeline Engine is released
     // https://issues.jenkins-ci.org/browse/JENKINS-47962
     // https://issues.jenkins-ci.org/browse/JENKINS-48050
 
     stage('Make Check') {
-
+      when {
+        beforeOptions true
+        expression { ONLY_DOCS_CHANGED == '0' }
+      }
       matrix {
         axes {
           axis {
             name 'ERLANG_VERSION'
-            values '20.3.8.26', '21.3.8.22', '22.3.4.17', '23.3.1'
+            values '24.3.4.14', '25.3.2.7'
+          }
+          axis {
+            name 'SM_VSN'
+            values '78'
           }
         }
 
@@ -115,7 +259,7 @@ pipeline {
           stage('Build and Test') {
             agent {
               docker {
-                image "${DOCKER_IMAGE}"
+                image "${DOCKER_IMAGE_BASE}-${ERLANG_VERSION}"
                 label 'docker'
                 args "${DOCKER_ARGS}"
               }
@@ -133,7 +277,7 @@ pipeline {
                 junit '**/.eunit/*.xml, **/_build/*/lib/couchdbtest/*.xml, **/src/mango/nosetests.xml, **/test/javascript/junit.xml'
               }
               cleanup {
-                sh 'rm -rf ${WORKSPACE}/* ${COUCHDB_IO_LOG_DIR}'
+                sh 'rm -rf ${WORKSPACE}/*'
               }
             }
           } // stage

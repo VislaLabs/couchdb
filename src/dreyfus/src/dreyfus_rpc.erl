@@ -10,7 +10,6 @@
 % License for the specific language governing permissions and limitations under
 % the License.
 
-
 %% -*- erlang-indent-level: 4;indent-tabs-mode: nil -*-
 
 -module(dreyfus_rpc).
@@ -81,8 +80,13 @@ info_int(DbName, DDoc, IndexName) ->
         {ok, Index} ->
             case dreyfus_index_manager:get_index(DbName, Index) of
                 {ok, Pid} ->
-                    Result = dreyfus_index:info(Pid),
-                    rexi:reply(Result);
+                    case dreyfus_index:info(Pid) of
+                        {ok, Fields} ->
+                            Info = [{signature, Index#index.sig} | Fields],
+                            rexi:reply({ok, Info});
+                        Else ->
+                            rexi:reply(Else)
+                    end;
                 Error ->
                     rexi:reply(Error)
             end;
@@ -109,7 +113,6 @@ get_or_create_db(DbName, Options) ->
         Else ->
             Else
     end.
-
 
 calculate_seqs(Db, Stale) ->
     LastSeq = couch_db:get_update_seq(Db),

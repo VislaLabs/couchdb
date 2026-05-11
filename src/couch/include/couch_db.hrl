@@ -15,6 +15,8 @@
 -define(DESIGN_DOC_PREFIX, "_design/").
 -define(DEFAULT_COMPRESSION, snappy).
 
+-define(DEFAULT_HASH_ALGORITHM, sha256).
+
 -define(MIN_STR, <<"">>).
 -define(MAX_STR, <<255>>). % illegal utf string
 
@@ -46,6 +48,8 @@
     <<"_users">>
 ]).
 
+-define(INTERACTIVE_EDIT, interactive_edit).
+-define(REPLICATED_CHANGES, replicated_changes).
 
 -type branch() :: {Key::term(), Value::term(), Tree::term()}.
 -type path() :: {Start::pos_integer(), branch()}.
@@ -189,11 +193,14 @@
 -record(proc, {
     pid,
     lang,
-    client = nil,
-    ddoc_keys = [],
+    client,
+    db_key,
+    ddoc_keys = #{},
     prompt_fun,
     set_timeout_fun,
-    stop_fun
+    stop_fun,
+    threshold_ts,
+    last_use_ts
 }).
 
 -record(leaf,  {
@@ -218,27 +225,3 @@
 -type user_ctx() :: #user_ctx{}.
 -type sec_props() :: [tuple()].
 -type sec_obj() :: {sec_props()}.
-
-%% Erlang/OTP 21 deprecates and 23 removes get_stacktrace(), so
-%% we have to monkey around until we can drop support < 21.
-%% h/t https://github.com/erlang/otp/pull/1783#issuecomment-386190970
-
-%% use like so:
-% try function1(Arg1)
-% catch
-%     ?STACKTRACE(exit, badarg, ErrorStackTrace)
-%         % do stuff with ErrorStackTrace
-%         % ...
-% end,
-
-% Get the stacktrace in a way that is backwards compatible
-% OTP_VERSION is only available in OTP 21 and later, so we don’t need
-% to do any other version magic here.
--ifdef(OTP_RELEASE).
--define(STACKTRACE(ErrorType, Error, Stack),
-        ErrorType:Error:Stack ->).
--else.
--define(STACKTRACE(ErrorType, Error, Stack),
-        ErrorType:Error ->
-            Stack = erlang:get_stacktrace(),).
--endif.

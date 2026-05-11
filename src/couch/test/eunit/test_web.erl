@@ -15,11 +15,11 @@
 
 -compile(tuple_calls).
 
--include_lib("couch/include/couch_eunit.hrl").
-
 -export([start_link/0, stop/0, loop/1, get_port/0, set_assert/1, check_last/0]).
 -export([init/1, terminate/2, code_change/3]).
 -export([handle_call/3, handle_cast/2, handle_info/2]).
+
+-include_lib("couch/include/couch_eunit.hrl").
 
 -define(SERVER, test_web_server).
 -define(HANDLER, test_web_handler).
@@ -73,18 +73,18 @@ terminate(_Reason, _State) ->
 stop() ->
     mochiweb_http:stop(?SERVER).
 
-
 handle_call({check_request, Req}, _From, State) when is_function(State, 1) ->
-    Resp2 = case (catch State(Req)) of
-        {ok, Resp} ->
-            {reply, {ok, Resp}, was_ok};
-        {raw, Resp} ->
-            {reply, {raw, Resp}, was_ok};
-        {chunked, Resp} ->
-            {reply, {chunked, Resp}, was_ok};
-        Error ->
-            {reply, {error, Error}, not_ok}
-    end,
+    Resp2 =
+        case (catch State(Req)) of
+            {ok, Resp} ->
+                {reply, {ok, Resp}, was_ok};
+            {raw, Resp} ->
+                {reply, {raw, Resp}, was_ok};
+            {chunked, Resp} ->
+                {reply, {chunked, Resp}, was_ok};
+            Error ->
+                {reply, {error, Error}, not_ok}
+        end,
     Req:cleanup(),
     Resp2;
 handle_call({check_request, _Req}, _From, _State) ->

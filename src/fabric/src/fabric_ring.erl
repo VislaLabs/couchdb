@@ -12,7 +12,6 @@
 
 -module(fabric_ring).
 
-
 -export([
     is_progress_possible/1,
     is_progress_possible/2,
@@ -25,20 +24,15 @@
     handle_response/5
 ]).
 
-
--include_lib("fabric/include/fabric.hrl").
 -include_lib("mem3/include/mem3.hrl").
-
 
 -type fabric_dict() :: [{#shard{}, any()}].
 -type ring_opts() :: [atom() | tuple()].
-
 
 %% @doc looks for a fully covered keyrange in the list of counters
 -spec is_progress_possible(fabric_dict()) -> boolean().
 is_progress_possible(Counters) ->
     is_progress_possible(Counters, []).
-
 
 %% @doc looks for a fully covered keyrange in the list of counters
 %% This version take ring option to configure how progress will
@@ -47,40 +41,38 @@ is_progress_possible(Counters) ->
 is_progress_possible(Counters, RingOpts) ->
     is_progress_possible(Counters, [], 0, ?RING_END, RingOpts).
 
-
 -spec get_shard_replacements(binary(), [#shard{}]) -> [#shard{}].
 get_shard_replacements(DbName, UsedShards0) ->
     % We only want to generate a replacements list from shards
     % that aren't already used.
     AllLiveShards = mem3:live_shards(DbName, [node() | nodes()]),
-    UsedShards = [S#shard{ref=undefined} || S <- UsedShards0],
+    UsedShards = [S#shard{ref = undefined} || S <- UsedShards0],
     get_shard_replacements_int(AllLiveShards -- UsedShards, UsedShards).
-
 
 -spec node_down(node(), fabric_dict(), fabric_dict()) ->
     {ok, fabric_dict()} | error.
 node_down(Node, Workers, Responses) ->
     node_down(Node, Workers, Responses, []).
 
-
 -spec node_down(node(), fabric_dict(), fabric_dict(), ring_opts()) ->
     {ok, fabric_dict()} | error.
 node_down(Node, Workers, Responses, RingOpts) ->
     {B, E} = range_bounds(Workers, Responses),
-    Workers1 = fabric_dict:filter(fun(#shard{node = N}, _) ->
-        N =/= Node
-    end, Workers),
+    Workers1 = fabric_dict:filter(
+        fun(#shard{node = N}, _) ->
+            N =/= Node
+        end,
+        Workers
+    ),
     case is_progress_possible(Workers1, Responses, B, E, RingOpts) of
         true -> {ok, Workers1};
         false -> error
     end.
 
-
 -spec handle_error(#shard{}, fabric_dict(), fabric_dict()) ->
     {ok, fabric_dict()} | error.
 handle_error(Shard, Workers, Responses) ->
     handle_error(Shard, Workers, Responses, []).
-
 
 -spec handle_error(#shard{}, fabric_dict(), fabric_dict(), ring_opts()) ->
     {ok, fabric_dict()} | error.
@@ -92,20 +84,28 @@ handle_error(Shard, Workers, Responses, RingOpts) ->
         false -> error
     end.
 
-
 -spec handle_response(#shard{}, any(), fabric_dict(), fabric_dict()) ->
     {ok, {fabric_dict(), fabric_dict()}} | {stop, fabric_dict()}.
 handle_response(Shard, Response, Workers, Responses) ->
     handle_response(Shard, Response, Workers, Responses, []).
 
-
--spec handle_response(#shard{}, any(), fabric_dict(), fabric_dict(),
-        ring_opts()) ->
+-spec handle_response(
+    #shard{},
+    any(),
+    fabric_dict(),
+    fabric_dict(),
+    ring_opts()
+) ->
     {ok, {fabric_dict(), fabric_dict()}} | {stop, fabric_dict()}.
 handle_response(Shard, Response, Workers, Responses, RingOpts) ->
-    handle_response(Shard, Response, Workers, Responses, RingOpts,
-        fun stop_workers/1).
-
+    handle_response(
+        Shard,
+        Response,
+        Workers,
+        Responses,
+        RingOpts,
+        fun stop_workers/1
+    ).
 
 % Worker response handler. Gets reponses from shard and puts them in the list
 % until they complete a full ring. Then kill unused responses and remaining
@@ -116,6 +116,14 @@ handle_response(Shard, Response, Workers, Responses, RingOpts) ->
 %  * When RingOpts is [] (the default case) responses must form a "clean"
 %    ring, where all copies at the start of the range and end of the range must
 %    have the same boundary values.
+%
+%  * When RingOpts is [{rmin, R}], where R is an integer, accumulate responses
+%    until the ring can be completed at least R times. If shards have not been
+%    split, this would be the same as waiting until there are at least R
+%    responses for each shard range. Also of note is that [] is not exactly
+%    equivalent to [{rmin, 1}], as with [{rmin, 1}] it's possible that some
+%    shard ranges would return more than R copies while waiting for other
+%    ranges to respond.
 %
 %  * When RingOpts is [{any, [#shard{}]}] responses are accepted from any of
 %    the provided list of shards. This type of ring might be used when querying
@@ -132,13 +140,16 @@ handle_response(Shard, Response, Workers, Responses, RingOpts, CleanupCb) ->
             #shard{range = [B, E]} = Shard,
             Responses1 = [{{B, E}, Shard, Response} | Responses],
             handle_response_ring(Workers1, Responses1, CleanupCb);
+        [{rmin, RMin}] when is_integer(RMin), RMin >= 1 ->
+            #shard{range = [B, E]} = Shard,
+            Responses1 = [{{B, E}, Shard, Response} | Responses],
+            handle_response_rmin(RMin, Workers1, Responses1, CleanupCb);
         [{any, Any}] ->
             handle_response_any(Shard, Response, Workers1, Any, CleanupCb);
         [all] ->
             Responses1 = [{Shard, Response} | Responses],
             handle_response_all(Workers1, Responses1)
     end.
-
 
 handle_response_ring(Workers, Responses, CleanupCb) ->
     {MinB, MaxE} = range_bounds(Workers, Responses),
@@ -159,6 +170,17 @@ handle_response_ring(Workers, Responses, CleanupCb) ->
             {stop, fabric_dict:from_list(UsedResponses)}
     end.
 
+handle_response_rmin(RMin, Workers, Responses, CleanupCb) ->
+    {MinB, MaxE} = range_bounds(Workers, Responses),
+    Shards = lists:map(fun({_, S, _}) -> S end, Responses),
+    case mem3_util:calculate_max_n(Shards, MinB, MaxE) of
+        MaxN when is_integer(MaxN), MaxN < RMin ->
+            {ok, {Workers, Responses}};
+        MaxN when is_integer(MaxN), MaxN >= RMin ->
+            UsedResponses = lists:map(fun({_, S, R}) -> {S, R} end, Responses),
+            stop_unused_workers(Workers, Responses, UsedResponses, CleanupCb),
+            {stop, fabric_dict:from_list(UsedResponses)}
+    end.
 
 handle_response_any(Shard, Response, Workers, Any, CleanupCb) ->
     case lists:member(Shard#shard{ref = undefined}, Any) of
@@ -169,7 +191,6 @@ handle_response_any(Shard, Response, Workers, Any, CleanupCb) ->
             {ok, {Workers, []}}
     end.
 
-
 handle_response_all(Workers, Responses) ->
     case fabric_dict:size(Workers) =:= 0 of
         true ->
@@ -177,7 +198,6 @@ handle_response_all(Workers, Responses) ->
         false ->
             {ok, {Workers, Responses}}
     end.
-
 
 % Check if workers still waiting and the already received responses could
 % still form a continous range. The range won't always be the full ring, and
@@ -191,19 +211,21 @@ handle_response_all(Workers, Responses) ->
 % might look like: 00-ff, 00-ff, 07-ff. Even if both 00-ff workers exit,
 % progress can still be made with the remaining 07-ff copy.
 %
--spec is_progress_possible(fabric_dict(), [{any(), #shard{}, any()}],
-    non_neg_integer(), non_neg_integer(), ring_opts()) -> boolean().
+-spec is_progress_possible(
+    fabric_dict(),
+    [{any(), #shard{}, any()}],
+    non_neg_integer(),
+    non_neg_integer(),
+    ring_opts()
+) -> boolean().
 is_progress_possible([], [], _, _, _) ->
     false;
-
 is_progress_possible(Counters, Responses, MinB, MaxE, []) ->
     ResponseRanges = lists:map(fun({{B, E}, _, _}) -> {B, E} end, Responses),
     Ranges = fabric_util:worker_ranges(Counters) ++ ResponseRanges,
     mem3_util:get_ring(Ranges, MinB, MaxE) =/= [];
-
 is_progress_possible(Counters, _Responses, _, _, [all]) ->
     fabric_dict:size(Counters) > 0;
-
 is_progress_possible(Counters, Responses, _, _, [{any, AnyShards}]) ->
     InAny = fun(S) -> lists:member(S#shard{ref = undefined}, AnyShards) end,
     case fabric_dict:filter(fun(S, _) -> InAny(S) end, Counters) of
@@ -216,30 +238,37 @@ is_progress_possible(Counters, Responses, _, _, [{any, AnyShards}]) ->
             true
     end.
 
-
 get_shard_replacements_int(UnusedShards, UsedShards) ->
     % If we have more than one copy of a range then we don't
     % want to try and add a replacement to any copy.
-    RangeCounts = lists:foldl(fun(#shard{range=R}, Acc) ->
-        dict:update_counter(R, 1, Acc)
-    end, dict:new(), UsedShards),
+    RangeCounts = lists:foldl(
+        fun(#shard{range = R}, Acc) ->
+            dict:update_counter(R, 1, Acc)
+        end,
+        dict:new(),
+        UsedShards
+    ),
 
     % For each seq shard range with a count of 1, find any
     % possible replacements from the unused shards. The
     % replacement list is keyed by range.
-    lists:foldl(fun(#shard{range = [B, E] = Range}, Acc) ->
-        case dict:find(Range, RangeCounts) of
-            {ok, 1} ->
-                Repls = mem3_util:non_overlapping_shards(UnusedShards, B, E),
-                % Only keep non-empty lists of replacements
-                if Repls == [] -> Acc; true ->
-                    [{Range, Repls} | Acc]
-                end;
-            _ ->
-                Acc
-        end
-    end, [], UsedShards).
-
+    lists:foldl(
+        fun(#shard{range = [B, E] = Range}, Acc) ->
+            case dict:find(Range, RangeCounts) of
+                {ok, 1} ->
+                    Repls = mem3_util:non_overlapping_shards(UnusedShards, B, E),
+                    % Only keep non-empty lists of replacements
+                    if
+                        Repls == [] -> Acc;
+                        true -> [{Range, Repls} | Acc]
+                    end;
+                _ ->
+                    Acc
+            end
+        end,
+        [],
+        UsedShards
+    ).
 
 range_bounds(Workers, Responses) ->
     RespRanges = lists:map(fun({R, _, _}) -> R end, Responses),
@@ -247,32 +276,27 @@ range_bounds(Workers, Responses) ->
     {Bs, Es} = lists:unzip(Ranges),
     {lists:min(Bs), lists:max(Es)}.
 
-
 get_responses([], _) ->
     [];
-
 get_responses([Range | Ranges], [{Range, Shard, Value} | Resps]) ->
     [{Shard, Value} | get_responses(Ranges, Resps)];
-
 get_responses(Ranges, [_DupeRangeResp | Resps]) ->
     get_responses(Ranges, Resps).
 
-
 stop_unused_workers(_, _, _, undefined) ->
     ok;
-
 stop_unused_workers(Workers, AllResponses, UsedResponses, CleanupCb) ->
     WorkerShards = [S || {S, _} <- Workers],
-    Used  = [S || {S, _} <- UsedResponses],
+    Used = [S || {S, _} <- UsedResponses],
     Unused = [S || {_, S, _} <- AllResponses, not lists:member(S, Used)],
     CleanupCb(WorkerShards ++ Unused).
-
 
 stop_workers(Shards) when is_list(Shards) ->
     rexi:kill_all([{Node, Ref} || #shard{node = Node, ref = Ref} <- Shards]).
 
+-ifdef(TEST).
 
-% Unit tests
+-include_lib("couch/include/couch_eunit.hrl").
 
 is_progress_possible_full_range_test() ->
     % a base case
@@ -296,7 +320,6 @@ is_progress_possible_full_range_test() ->
     % not possible, overlap is not exact
     T7 = [[0, 10], [13, 20], [21, ?RING_END], [9, 12]],
     ?assertEqual(false, is_progress_possible(mk_cnts(T7))).
-
 
 is_progress_possible_with_responses_test() ->
     C1 = mk_cnts([[0, ?RING_END]]),
@@ -322,7 +345,6 @@ is_progress_possible_with_responses_test() ->
     ?assertEqual(false, is_progress_possible([], RS1, 5, 8, [])),
     ?assertEqual(true, is_progress_possible([], RS1, 7, 8, [])).
 
-
 is_progress_possible_with_ring_opts_any_test() ->
     Opts = [{any, [mk_shard("n1", [0, 5]), mk_shard("n2", [3, 10])]}],
     C1 = [{mk_shard("n1", [0, ?RING_END]), nil}],
@@ -340,23 +362,31 @@ is_progress_possible_with_ring_opts_any_test() ->
     C2 = [{mk_shard("n1", [0, 5]), nil}],
     ?assertEqual(true, is_progress_possible(C2, [], 0, ?RING_END, Opts)).
 
-
 is_progress_possible_with_ring_opts_all_test() ->
     C1 = [{mk_shard("n1", [0, ?RING_END]), nil}],
     ?assertEqual(true, is_progress_possible(C1, [], 0, ?RING_END, [all])),
     ?assertEqual(false, is_progress_possible([], [], 0, ?RING_END, [all])).
 
-
 get_shard_replacements_test() ->
-    Unused = [mk_shard(N, [B, E]) || {N, B, E} <- [
-        {"n1", 11, 20}, {"n1", 21, ?RING_END},
-        {"n2", 0, 4}, {"n2", 5, 10}, {"n2", 11, 20},
-        {"n3", 0, 21, ?RING_END}
-    ]],
-    Used = [mk_shard(N, [B, E]) || {N, B, E} <- [
-        {"n2", 21, ?RING_END},
-        {"n3", 0, 10}, {"n3", 11, 20}
-    ]],
+    Unused = [
+        mk_shard(N, [B, E])
+     || {N, B, E} <- [
+            {"n1", 11, 20},
+            {"n1", 21, ?RING_END},
+            {"n2", 0, 4},
+            {"n2", 5, 10},
+            {"n2", 11, 20},
+            {"n3", 0, 21, ?RING_END}
+        ]
+    ],
+    Used = [
+        mk_shard(N, [B, E])
+     || {N, B, E} <- [
+            {"n2", 21, ?RING_END},
+            {"n3", 0, 10},
+            {"n3", 11, 20}
+        ]
+    ],
     Res = lists:sort(get_shard_replacements_int(Unused, Used)),
     % Notice that [0, 10] range can be replaces by spawning the
     % [0, 4] and [5, 10] workers on n1
@@ -366,7 +396,6 @@ get_shard_replacements_test() ->
         {[21, ?RING_END], [mk_shard("n1", [21, ?RING_END])]}
     ],
     ?assertEqual(Expect, Res).
-
 
 handle_response_basic_test() ->
     Shard1 = mk_shard("n1", [0, 1]),
@@ -383,7 +412,6 @@ handle_response_basic_test() ->
     Result2 = handle_response(Shard2, 43, Workers2, Responses1, [], undefined),
     ?assertEqual({stop, [{Shard1, 42}, {Shard2, 43}]}, Result2).
 
-
 handle_response_incomplete_ring_test() ->
     Shard1 = mk_shard("n1", [0, 1]),
     Shard2 = mk_shard("n1", [2, 10]),
@@ -398,7 +426,6 @@ handle_response_incomplete_ring_test() ->
 
     Result2 = handle_response(Shard2, 43, Workers2, Responses1, [], undefined),
     ?assertEqual({stop, [{Shard1, 42}, {Shard2, 43}]}, Result2).
-
 
 handle_response_multiple_copies_test() ->
     Shard1 = mk_shard("n1", [0, 1]),
@@ -420,7 +447,6 @@ handle_response_multiple_copies_test() ->
     % they should have the same value but here we need to assert that copy
     % that responded first is included in the ring.
     ?assertEqual({stop, [{Shard1, 42}, {Shard3, 44}]}, Result3).
-
 
 handle_response_backtracking_test() ->
     Shard1 = mk_shard("n1", [0, 5]),
@@ -445,6 +471,49 @@ handle_response_backtracking_test() ->
     Result4 = handle_response(Shard4, 45, Workers4, Responses3, [], undefined),
     ?assertEqual({stop, [{Shard3, 44}, {Shard4, 45}]}, Result4).
 
+handle_response_rmin_test() ->
+    Shard1 = mk_shard("n1", [0, 5]),
+    Shard2 = mk_shard("n1", [6, 9]),
+    Shard3 = mk_shard("n1", [10, ?RING_END]),
+    Shard4 = mk_shard("n2", [2, ?RING_END]),
+    Shard5 = mk_shard("n3", [0, 1]),
+
+    Workers1 = fabric_dict:init([Shard1, Shard2, Shard3, Shard4, Shard5], nil),
+
+    Opts = [{rmin, 2}],
+
+    Result1 = handle_response(Shard1, 101, Workers1, [], Opts, undefined),
+    ?assertMatch({ok, {_, _}}, Result1),
+    {ok, {Workers2, Responses1}} = Result1,
+
+    Result2 = handle_response(Shard3, 103, Workers2, Responses1, Opts, undefined),
+    ?assertMatch({ok, {_, _}}, Result2),
+    {ok, {Workers3, Responses2}} = Result2,
+
+    Result3 = handle_response(Shard4, 104, Workers3, Responses2, Opts, undefined),
+    ?assertMatch({ok, {_, _}}, Result3),
+    {ok, {Workers4, Responses3}} = Result3,
+
+    Result4 = handle_response(Shard5, 105, Workers4, Responses3, Opts, undefined),
+    % Even though Shard4 and Shard5 would complete a full ring we're not done
+    % we need two full rings since our rmin is 2.
+    ?assertMatch({ok, {_, _}}, Result4),
+    {ok, {Workers5, Responses4}} = Result4,
+
+    Result5 = handle_response(Shard2, 102, Workers5, Responses4, Opts, undefined),
+    ?assertMatch({stop, [_ | _]}, Result5),
+
+    {stop, FinalResponses} = Result5,
+    ?assertEqual(
+        [
+            {Shard1, 101},
+            {Shard2, 102},
+            {Shard3, 103},
+            {Shard4, 104},
+            {Shard5, 105}
+        ],
+        lists:sort(FinalResponses)
+    ).
 
 handle_response_ring_opts_any_test() ->
     Shard1 = mk_shard("n1", [0, 5]),
@@ -469,7 +538,6 @@ handle_response_ring_opts_any_test() ->
     Result3 = handle_response(Shard3, 44, Workers3, [], Opts, undefined),
     ?assertEqual({stop, [{Shard3, 44}]}, Result3).
 
-
 handle_response_ring_opts_all_test() ->
     Shard1 = mk_shard("n1", [0, 5]),
     Shard2 = mk_shard("n2", [0, 1]),
@@ -493,7 +561,6 @@ handle_response_ring_opts_all_test() ->
     Result3 = handle_response(W3, 44, Workers3, [], [all], undefined),
     ?assertMatch({stop, [_ | _]}, Result3).
 
-
 handle_error_test() ->
     Shard1 = mk_shard("n1", [0, 5]),
     Shard2 = mk_shard("n1", [10, ?RING_END]),
@@ -515,7 +582,6 @@ handle_error_test() ->
     ?assertMatch({ok, {_, _}}, Result3),
     {ok, {Workers4, Responses3}} = Result3,
     ?assertEqual(error, handle_error(Shard4, Workers4, Responses3)).
-
 
 node_down_test() ->
     Shard1 = mk_shard("n1", [0, 5]),
@@ -547,21 +613,80 @@ node_down_test() ->
 
     ?assertEqual(error, node_down(n3, Workers5, Responses3)).
 
+% Check that cleanup callback for fabric:handle_response/* gets called both to
+% kill workers which haven't returned or results which were not used (for
+% example if we wanted to stream for only the results we picked and throw the
+% other results away).
+%
+handle_response_cleanup_callback_test_() ->
+    {
+        foreach,
+        fun setup/0,
+        fun teardown/1,
+        [
+            ?TDEF_FE(t_cleanup_unused),
+            ?TDEF_FE(t_cleanup_not_returned)
+        ]
+    }.
+
+setup() ->
+    meck:new(rexi, [passthrough]),
+    meck:expect(rexi, kill_all, 1, ok),
+    ok.
+
+teardown(_) ->
+    meck:unload().
+
+t_cleanup_unused(_) ->
+    Ref1 = make_ref(),
+    Ref2 = make_ref(),
+    Ref3 = make_ref(),
+    Shard1 = mk_shard("n1", [0, 1], Ref1),
+    Shard2 = mk_shard("n2", [0, 1], Ref2),
+    Shard3 = mk_shard("n1", [2, ?RING_END], Ref3),
+
+    Workers1 = fabric_dict:init([Shard1, Shard2, Shard3], nil),
+    {ok, {Workers2, Responses1}} = handle_response(Shard1, 42, Workers1, []),
+    {ok, {Workers3, Responses2}} = handle_response(Shard2, 43, Workers2, Responses1),
+    {stop, [{_, 42}, {_, 44}]} = handle_response(Shard3, 44, Workers3, Responses2),
+    ?assertMatch(
+        [
+            {_, {rexi, kill_all, [[{n2, Ref2}]]}, ok}
+        ],
+        meck:history(rexi)
+    ).
+
+t_cleanup_not_returned(_) ->
+    Ref1 = make_ref(),
+    Ref2 = make_ref(),
+    Shard1 = mk_shard("n1", [0, ?RING_END], Ref1),
+    Shard2 = mk_shard("n2", [0, ?RING_END], Ref2),
+
+    Workers = fabric_dict:init([Shard1, Shard2], nil),
+    {stop, [{_, 42}]} = handle_response(Shard1, 42, Workers, []),
+    ?assertMatch(
+        [
+            {_, {rexi, kill_all, [[{n2, Ref2}]]}, ok}
+        ],
+        meck:history(rexi)
+    ).
 
 mk_cnts(Ranges) ->
     Shards = lists:map(fun mk_shard/1, Ranges),
     fabric_dict:init([S#shard{ref = make_ref()} || S <- Shards], nil).
 
-
 mk_resps(RangeNameVals) ->
     [{{B, E}, mk_shard(Name, [B, E]), V} || {Name, B, E, V} <- RangeNameVals].
-
 
 mk_shard([B, E]) when is_integer(B), is_integer(E) ->
     #shard{range = [B, E]}.
 
-
 mk_shard(Name, Range) ->
+    mk_shard(Name, Range, undefined).
+
+mk_shard(Name, Range, Ref) ->
     Node = list_to_atom(Name),
     BName = list_to_binary(Name),
-    #shard{name = BName, node = Node, range = Range}.
+    #shard{name = BName, node = Node, range = Range, ref = Ref}.
+
+-endif.

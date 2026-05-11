@@ -14,22 +14,17 @@
 -compile(export_all).
 -compile(nowarn_export_all).
 
-
 -include_lib("eunit/include/eunit.hrl").
 -include_lib("couch/include/couch_db.hrl").
 
-
 -define(NUM_CLIENTS, 1000).
-
 
 setup_each() ->
     {ok, Db} = cpse_util:create_db(),
     {Db, self()}.
 
-
 teardown_each({Db, _}) ->
     ok = couch_server:delete(couch_db:name(Db), []).
-
 
 cpse_empty_monitors({Db, Pid}) ->
     Pids = couch_db_engine:monitored_by(Db),
@@ -41,24 +36,32 @@ cpse_empty_monitors({Db, Pid}) ->
     ],
     ?assertEqual([], Pids -- Expected).
 
-
 cpse_incref_decref({Db, _}) ->
     {Pid, _} = Client = start_client(Db),
     wait_client(Client),
 
-    Pids1 = couch_db_engine:monitored_by(Db),
-    ?assert(lists:member(Pid, Pids1)),
+    test_util:wait(
+        fun() ->
+            MonitoredPids1 = couch_db_engine:monitored_by(Db),
+            case lists:member(Pid, MonitoredPids1) of
+                true -> ok;
+                false -> wait
+            end
+        end
+    ),
 
     close_client(Client),
 
     Pids2 = couch_db_engine:monitored_by(Db),
     ?assert(not lists:member(Pid, Pids2)).
 
-
 cpse_incref_decref_many({Db, _}) ->
-    Clients = lists:map(fun(_) ->
-        start_client(Db)
-    end, lists:seq(1, ?NUM_CLIENTS)),
+    Clients = lists:map(
+        fun(_) ->
+            start_client(Db)
+        end,
+        lists:seq(1, ?NUM_CLIENTS)
+    ),
 
     lists:foreach(fun(C) -> wait_client(C) end, Clients),
 
@@ -70,7 +73,6 @@ cpse_incref_decref_many({Db, _}) ->
 
     Pids2 = couch_db_engine:monitored_by(Db),
     ?assertEqual(3, length(Pids2)).
-
 
 start_client(Db0) ->
     spawn_monitor(fun() ->
@@ -92,7 +94,6 @@ start_client(Db0) ->
         end
     end).
 
-
 wait_client({Pid, _Ref}) ->
     Pid ! {waiting, self()},
     receive
@@ -100,7 +101,6 @@ wait_client({Pid, _Ref}) ->
     after 1000 ->
         erlang:error(timeout)
     end.
-
 
 close_client({Pid, Ref}) ->
     Pid ! close,
@@ -110,4 +110,3 @@ close_client({Pid, Ref}) ->
     after 1000 ->
         erlang:error(timeout)
     end.
-

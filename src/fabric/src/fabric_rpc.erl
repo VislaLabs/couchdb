@@ -12,21 +12,47 @@
 
 -module(fabric_rpc).
 
--export([get_db_info/1, get_doc_count/1, get_design_doc_count/1,
-         get_update_seq/1]).
--export([open_doc/3, open_revs/4, get_doc_info/3, get_full_doc_info/3,
-    get_missing_revs/2, get_missing_revs/3, update_docs/3]).
+-export([
+    get_db_info/1,
+    get_doc_count/1,
+    get_design_doc_count/1,
+    get_update_seq/1
+]).
+-export([
+    open_doc/3,
+    open_revs/3, open_revs/4,
+    get_doc_info/3,
+    get_full_doc_info/3,
+    get_missing_revs/2, get_missing_revs/3,
+    update_docs/3
+]).
 -export([all_docs/3, changes/3, map_view/4, reduce_view/4, group_info/2]).
--export([create_db/1, create_db/2, delete_db/1, reset_validation_funs/1,
-    set_security/3, set_revs_limit/3, create_shard_db_doc/2,
-    delete_shard_db_doc/2, get_partition_info/2]).
+-export([
+    create_db/1, create_db/2,
+    delete_db/1,
+    reset_validation_funs/1,
+    set_security/3,
+    set_revs_limit/3,
+    create_shard_db_doc/2,
+    delete_shard_db_doc/2,
+    get_partition_info/2
+]).
 -export([get_all_security/2, open_shard/2]).
 -export([compact/1, compact/2]).
 -export([get_purge_seq/2, purge_docs/3, set_purge_infos_limit/3]).
 
--export([get_db_info/2, get_doc_count/2, get_design_doc_count/2,
-         get_update_seq/2, changes/4, map_view/5, reduce_view/5,
-         group_info/3, update_mrview/4, get_uuid/1]).
+-export([
+    get_db_info/2,
+    get_doc_count/2,
+    get_design_doc_count/2,
+    get_update_seq/2,
+    changes/4,
+    map_view/5,
+    reduce_view/5,
+    group_info/3,
+    update_mrview/4,
+    get_uuid/1
+]).
 
 -include_lib("fabric/include/fabric.hrl").
 -include_lib("couch/include/couch_db.hrl").
@@ -45,79 +71,86 @@ changes(DbName, #changes_args{} = Args, StartSeq, DbOptions) ->
 changes(DbName, Options, StartVector, DbOptions) ->
     set_io_priority(DbName, DbOptions),
     Args0 = lists:keyfind(changes_args, 1, Options),
-    #changes_args{dir=Dir, filter_fun=Filter} = Args0,
-    Args = case Filter of
-        {fetch, custom, Style, Req, {DDocId, Rev}, FName} ->
-            {ok, DDoc} = ddoc_cache:open_doc(mem3:dbname(DbName), DDocId, Rev),
-            Args0#changes_args{
-                filter_fun={custom, Style, Req, DDoc, FName}
-            };
-        {fetch, view, Style, {DDocId, Rev}, VName} ->
-            {ok, DDoc} = ddoc_cache:open_doc(mem3:dbname(DbName), DDocId, Rev),
-            Args0#changes_args{filter_fun={view, Style, DDoc, VName}};
-        _ ->
-            Args0
-    end,
+    #changes_args{dir = Dir, filter_fun = Filter} = Args0,
+    Args =
+        case Filter of
+            {fetch, custom, Style, Req, {DDocId, Rev}, FName} ->
+                {ok, DDoc} = ddoc_cache:open_doc(mem3:dbname(DbName), DDocId, Rev),
+                Args0#changes_args{
+                    filter_fun = {custom, Style, Req, DDoc, FName}
+                };
+            {fetch, view, Style, {DDocId, Rev}, VName} ->
+                {ok, DDoc} = ddoc_cache:open_doc(mem3:dbname(DbName), DDocId, Rev),
+                Args0#changes_args{filter_fun = {view, Style, DDoc, VName}};
+            _ ->
+                Args0
+        end,
 
     DbOpenOptions = Args#changes_args.db_open_options ++ DbOptions,
     case get_or_create_db(DbName, DbOpenOptions) of
-    {ok, Db} ->
-        StartSeq = calculate_start_seq(Db, node(), StartVector),
-        Enum = fun changes_enumerator/2,
-        Opts = [{dir,Dir}],
-        Acc0 = #fabric_changes_acc{
-          db = Db,
-          seq = StartSeq,
-          args = Args,
-          options = Options,
-          pending = couch_db:count_changes_since(Db, StartSeq),
-          epochs = couch_db:get_epochs(Db)
-        },
-        try
-            {ok, #fabric_changes_acc{seq=LastSeq, pending=Pending, epochs=Epochs}} =
-                do_changes(Db, StartSeq, Enum, Acc0, Opts),
-            rexi:stream_last({complete, [
-                {seq, {LastSeq, uuid(Db), couch_db:owner_of(Epochs, LastSeq)}},
-                {pending, Pending}
-            ]})
-        after
-            couch_db:close(Db)
-        end;
-    Error ->
-        rexi:stream_last(Error)
+        {ok, Db} ->
+            StartSeq = calculate_start_seq(Db, node(), StartVector),
+            Enum = fun changes_enumerator/2,
+            Opts = [{dir, Dir}],
+            Acc0 = #fabric_changes_acc{
+                db = Db,
+                seq = StartSeq,
+                args = Args,
+                options = Options,
+                pending = couch_db:count_changes_since(Db, StartSeq),
+                epochs = couch_db:get_epochs(Db)
+            },
+            try
+                {ok, #fabric_changes_acc{seq = LastSeq, pending = Pending, epochs = Epochs}} =
+                    do_changes(Db, StartSeq, Enum, Acc0, Opts),
+                rexi:stream_last(
+                    {complete, [
+                        {seq, {LastSeq, uuid(Db), couch_db:owner_of(Epochs, LastSeq)}},
+                        {pending, Pending}
+                    ]}
+                )
+            after
+                couch_db:close(Db)
+            end;
+        Error ->
+            rexi:stream_last(Error)
     end.
 
 do_changes(Db, StartSeq, Enum, Acc0, Opts) ->
-    #fabric_changes_acc {
+    #fabric_changes_acc{
         args = Args
     } = Acc0,
-    #changes_args {
+    #changes_args{
         filter = Filter
     } = Args,
     case Filter of
         "_doc_ids" ->
             % optimised code path, we’re looking up all doc_ids in the by-id instead of filtering
             % the entire by-seq tree to find the doc_ids one by one
-            #changes_args {
+            #changes_args{
                 filter_fun = {doc_ids, Style, DocIds},
                 dir = Dir
             } = Args,
-            couch_changes:send_changes_doc_ids(Db, StartSeq, Dir, Enum, Acc0, {doc_ids, Style, DocIds});
+            couch_changes:send_changes_doc_ids(
+                Db, StartSeq, Dir, Enum, Acc0, {doc_ids, Style, DocIds}
+            );
         "_design_docs" ->
             % optimised code path, we’re looking up all design_docs in the by-id instead of
             % filtering the entire by-seq tree to find the design_docs one by one
-            #changes_args {
+            #changes_args{
                 filter_fun = {design_docs, Style},
                 dir = Dir
             } = Args,
-            couch_changes:send_changes_design_docs(Db, StartSeq, Dir, Enum, Acc0, {design_docs, Style});
+            couch_changes:send_changes_design_docs(
+                Db, StartSeq, Dir, Enum, Acc0, {design_docs, Style}
+            );
         _ ->
             couch_db:fold_changes(Db, StartSeq, Enum, Acc0, Opts)
     end.
 
 all_docs(DbName, Options, Args0) ->
     case fabric_util:upgrade_mrargs(Args0) of
-        #mrargs{keys=undefined} = Args ->
+        #mrargs{keys = undefined} = Args ->
             set_io_priority(DbName, Options),
             {ok, Db} = get_or_create_db(DbName, Options),
             CB = get_view_cb(Args),
@@ -129,7 +162,8 @@ update_mrview(DbName, {DDocId, Rev}, ViewName, Args0) ->
     couch_util:with_db(DbName, fun(Db) ->
         UpdateSeq = couch_db:get_update_seq(Db),
         {ok, Pid, _} = couch_mrview:get_view_index_pid(
-            Db, DDoc, ViewName, fabric_util:upgrade_mrargs(Args0)),
+            Db, DDoc, ViewName, fabric_util:upgrade_mrargs(Args0)
+        ),
         couch_index:get_state(Pid, UpdateSeq)
     end).
 
@@ -158,19 +192,21 @@ reduce_view(DbName, DDoc, ViewName, Args0, DbOptions) ->
     set_io_priority(DbName, DbOptions),
     Args = fabric_util:upgrade_mrargs(Args0),
     {ok, Db} = get_or_create_db(DbName, DbOptions),
-    VAcc0 = #vacc{db=Db},
+    VAcc0 = #vacc{db = Db},
     couch_mrview:query_view(Db, DDoc, ViewName, Args, fun reduce_cb/2, VAcc0).
 
 create_db(DbName) ->
     create_db(DbName, []).
 
 create_db(DbName, Options) ->
-    rexi:reply(case couch_server:create(DbName, Options) of
-    {ok, _} ->
-        ok;
-    Error ->
-        Error
-    end).
+    rexi:reply(
+        case couch_server:create(DbName, Options) of
+            {ok, _} ->
+                ok;
+            Error ->
+                Error
+        end
+    ).
 
 create_shard_db_doc(_, Doc) ->
     rexi:reply(mem3_util:write_db_doc(Doc)).
@@ -213,12 +249,13 @@ get_update_seq(DbName, DbOptions) ->
     with_db(DbName, DbOptions, {couch_db, get_update_seq, []}).
 
 set_security(DbName, SecObj, Options0) ->
-    Options = case lists:keyfind(io_priority, 1, Options0) of
-        false ->
-            [{io_priority, {db_meta, security}}|Options0];
-        _ ->
-            Options0
-    end,
+    Options =
+        case lists:keyfind(io_priority, 1, Options0) of
+            false ->
+                [{io_priority, {db_meta, security}} | Options0];
+            _ ->
+                Options0
+        end,
     with_db(DbName, Options, {couch_db, set_security, [SecObj]}).
 
 get_all_security(DbName, Options) ->
@@ -233,6 +270,9 @@ set_purge_infos_limit(DbName, Limit, Options) ->
 open_doc(DbName, DocId, Options) ->
     with_db(DbName, Options, {couch_db, open_doc, [DocId, Options]}).
 
+open_revs(DbName, IdRevsOpts, Options) ->
+    with_db(DbName, Options, {couch_db, open_doc_revs, [IdRevsOpts, Options]}).
+
 open_revs(DbName, Id, Revs, Options) ->
     with_db(DbName, Options, {couch_db, open_doc_revs, [Id, Revs, Options]}).
 
@@ -246,39 +286,24 @@ get_missing_revs(DbName, IdRevsList) ->
     get_missing_revs(DbName, IdRevsList, []).
 
 get_missing_revs(DbName, IdRevsList, Options) ->
-    % reimplement here so we get [] for Ids with no missing revs in response
-    set_io_priority(DbName, Options),
-    rexi:reply(case get_or_create_db(DbName, Options) of
-    {ok, Db} ->
-        Ids = [Id1 || {Id1, _Revs} <- IdRevsList],
-        {ok, lists:zipwith(fun({Id, Revs}, FullDocInfoResult) ->
-            case FullDocInfoResult of
-            #full_doc_info{rev_tree=RevisionTree} = FullInfo ->
-                MissingRevs = couch_key_tree:find_missing(RevisionTree, Revs),
-                {Id, MissingRevs, possible_ancestors(FullInfo, MissingRevs)};
-            not_found ->
-                {Id, Revs, []}
-            end
-        end, IdRevsList, couch_db:get_full_doc_infos(Db, Ids))};
-    Error ->
-        Error
-    end).
+    with_db(DbName, Options, {couch_db, get_missing_revs, [IdRevsList]}).
 
 update_docs(DbName, Docs0, Options) ->
-    {Docs1, Type} = case couch_util:get_value(read_repair, Options) of
-        NodeRevs when is_list(NodeRevs) ->
-            Filtered = read_repair_filter(DbName, Docs0, NodeRevs, Options),
-            {Filtered, replicated_changes};
-        undefined ->
-            X = case proplists:get_value(replicated_changes, Options) of
-                true -> replicated_changes;
-                _ -> interactive_edit
-            end,
-            {Docs0, X}
-    end,
+    {Docs1, Type} =
+        case couch_util:get_value(read_repair, Options) of
+            NodeRevs when is_list(NodeRevs) ->
+                Filtered = read_repair_filter(DbName, Docs0, NodeRevs, Options),
+                {Filtered, ?REPLICATED_CHANGES};
+            undefined ->
+                X =
+                    case proplists:get_value(?REPLICATED_CHANGES, Options) of
+                        true -> ?REPLICATED_CHANGES;
+                        _ -> ?INTERACTIVE_EDIT
+                    end,
+                {Docs0, X}
+        end,
     Docs2 = make_att_readers(Docs1),
     with_db(DbName, Options, {couch_db, update_docs, [Docs2, Options, Type]}).
-
 
 get_purge_seq(DbName, Options) ->
     with_db(DbName, Options, {couch_db, get_purge_seq, []}).
@@ -295,18 +320,19 @@ group_info(DbName, DDocId, DbOptions) ->
 
 reset_validation_funs(DbName) ->
     case get_or_create_db(DbName, []) of
-    {ok, Db} ->
-        couch_db:reload_validation_funs(Db);
-    _ ->
-        ok
+        {ok, Db} ->
+            couch_db:reload_validation_funs(Db);
+        _ ->
+            ok
     end.
 
 open_shard(Name, Opts) ->
     set_io_priority(Name, Opts),
     try
         rexi:reply(mem3_util:get_or_create_db(Name, Opts))
-    catch exit:{timeout, _} ->
-        couch_stats:increment_counter([fabric, open_shard, timeouts])
+    catch
+        exit:{timeout, _} ->
+            couch_stats:increment_counter([fabric, open_shard, timeouts])
     end.
 
 compact(DbName) ->
@@ -314,7 +340,8 @@ compact(DbName) ->
 
 compact(ShardName, DesignName) ->
     {ok, Pid} = couch_index_server:get_index(
-        couch_mrview_index, ShardName, <<"_design/", DesignName/binary>>),
+        couch_mrview_index, ShardName, <<"_design/", DesignName/binary>>
+    ),
     Ref = erlang:make_ref(),
     Pid ! {'$gen_call', {self(), Ref}, compact}.
 
@@ -325,23 +352,30 @@ get_uuid(DbName) ->
 %% internal
 %%
 
-with_db(DbName, Options, {M,F,A}) ->
+with_db(DbName, Options, {M, F, A}) ->
     set_io_priority(DbName, Options),
     case get_or_create_db(DbName, Options) of
-    {ok, Db} ->
-        rexi:reply(try
-            apply(M, F, [Db | A])
-        catch Exception ->
-            Exception;
-        ?STACKTRACE(error, Reason, Stack)
-            couch_log:error("rpc ~p:~p/~p ~p ~p", [M, F, length(A)+1, Reason,
-                clean_stack(Stack)]),
-            {error, Reason}
-        end);
-    Error ->
-        rexi:reply(Error)
+        {ok, Db} ->
+            rexi:reply(
+                try
+                    apply(M, F, [Db | A])
+                catch
+                    Exception ->
+                        Exception;
+                    error:Reason:Stack ->
+                        couch_log:error("rpc ~p:~p/~p ~p ~p", [
+                            M,
+                            F,
+                            length(A) + 1,
+                            Reason,
+                            clean_stack(Stack)
+                        ]),
+                        {error, Reason}
+                end
+            );
+        Error ->
+            rexi:reply(Error)
     end.
-
 
 read_repair_filter(DbName, Docs, NodeRevs, Options) ->
     set_io_priority(DbName, Options),
@@ -355,7 +389,6 @@ read_repair_filter(DbName, Docs, NodeRevs, Options) ->
         Error ->
             rexi:reply(Error)
     end.
-
 
 % A read repair operation may have been triggered by a node
 % that was out of sync with the local node. Thus, any time
@@ -393,16 +426,21 @@ read_repair_filter(Db, Docs, NodeRevs) ->
     % For each node we scan the purge infos to filter out any
     % revisions that have been locally purged since we last
     % replicated to the remote node's shard copy.
-    AllowableRevs = lists:foldl(fun({Node, Revs}, RevAcc) ->
-        {Node, StartSeq} = lists:keyfind(Node, 1, NodeSeqs),
-        FoldFun = fun({_PSeq, _UUID, PDocId, PRevs}, InnerAcc) ->
-            if PDocId /= DocId -> {ok, InnerAcc}; true ->
-                {ok, InnerAcc -- PRevs}
-            end
+    AllowableRevs = lists:foldl(
+        fun({Node, Revs}, RevAcc) ->
+            {Node, StartSeq} = lists:keyfind(Node, 1, NodeSeqs),
+            FoldFun = fun({_PSeq, _UUID, PDocId, PRevs}, InnerAcc) ->
+                if
+                    PDocId /= DocId -> {ok, InnerAcc};
+                    true -> {ok, InnerAcc -- PRevs}
+                end
+            end,
+            {ok, FiltRevs} = couch_db:fold_purge_infos(Db, StartSeq, FoldFun, Revs),
+            lists:usort(FiltRevs ++ RevAcc)
         end,
-        {ok, FiltRevs} = couch_db:fold_purge_infos(Db, StartSeq, FoldFun, Revs),
-        lists:usort(FiltRevs ++ RevAcc)
-    end, [], RecentNodeRevs),
+        [],
+        RecentNodeRevs
+    ),
 
     % Finally, filter the doc updates to only include revisions
     % that have not been purged locally.
@@ -410,7 +448,6 @@ read_repair_filter(Db, Docs, NodeRevs) ->
         lists:member({Pos, Rev}, AllowableRevs)
     end,
     lists:filter(DocFiltFun, Docs).
-
 
 get_node_seqs(Db, Nodes) ->
     % Gather the list of {Node, PurgeSeq} pairs for all nodes
@@ -439,11 +476,8 @@ get_node_seqs(Db, Nodes) ->
     {ok, NodeBinSeqs} = couch_db:fold_local_docs(Db, FoldFun, InitAcc, Opts),
     [{list_to_existing_atom(binary_to_list(N)), S} || {N, S} <- NodeBinSeqs].
 
-
-
 get_or_create_db(DbName, Options) ->
     mem3_util:get_or_create_db_int(DbName, Options).
-
 
 get_view_cb(#mrargs{extra = Options}) ->
     case couch_util:get_value(callback, Options) of
@@ -454,7 +488,6 @@ get_view_cb(#mrargs{extra = Options}) ->
     end;
 get_view_cb(_) ->
     fun view_cb/2.
-
 
 view_cb({meta, Meta}, Acc) ->
     % Map function starting
@@ -477,7 +510,6 @@ view_cb(complete, Acc) ->
 view_cb(ok, ddoc_updated) ->
     rexi:reply({ok, ddoc_updated}).
 
-
 reduce_cb({meta, Meta}, Acc) ->
     % Map function starting
     ok = rexi:stream2({meta, Meta}),
@@ -496,11 +528,10 @@ reduce_cb(complete, Acc) ->
 reduce_cb(ok, ddoc_updated) ->
     rexi:reply({ok, ddoc_updated}).
 
-
 changes_enumerator(#full_doc_info{} = FDI, Acc) ->
     changes_enumerator(couch_doc:to_doc_info(FDI), Acc);
-changes_enumerator(#doc_info{id= <<"_local/", _/binary>>, high_seq=Seq}, Acc) ->
-    {ok, Acc#fabric_changes_acc{seq = Seq, pending = Acc#fabric_changes_acc.pending-1}};
+changes_enumerator(#doc_info{id = <<"_local/", _/binary>>, high_seq = Seq}, Acc) ->
+    {ok, Acc#fabric_changes_acc{seq = Seq, pending = Acc#fabric_changes_acc.pending - 1}};
 changes_enumerator(DocInfo, Acc) ->
     #fabric_changes_acc{
         db = Db,
@@ -513,77 +544,94 @@ changes_enumerator(DocInfo, Acc) ->
         pending = Pending,
         epochs = Epochs
     } = Acc,
-    #doc_info{id=Id, high_seq=Seq, revs=[#rev_info{deleted=Del}|_]} = DocInfo,
+    #doc_info{id = Id, high_seq = Seq, revs = [#rev_info{deleted = Del} | _]} = DocInfo,
     case [X || X <- couch_changes:filter(Db, DocInfo, Filter), X /= null] of
-    [] ->
-        ChangesRow = {no_pass, [
-            {pending, Pending-1},
-            {seq, {Seq, uuid(Db), couch_db:owner_of(Epochs, Seq)}}
-        ]};
-    Results ->
-        Opts = if Conflicts -> [conflicts | DocOptions]; true -> DocOptions end,
-        ChangesRow = {change, [
-	    {pending, Pending-1},
-            {seq, {Seq, uuid(Db), couch_db:owner_of(Epochs, Seq)}},
-            {id, Id},
-            {changes, Results},
-            {deleted, Del} |
-            if IncludeDocs -> [doc_member(Db, DocInfo, Opts, Filter)]; true -> [] end
-        ]}
+        [] ->
+            ChangesRow =
+                {no_pass, [
+                    {pending, Pending - 1},
+                    {seq, {Seq, uuid(Db), couch_db:owner_of(Epochs, Seq)}}
+                ]};
+        Results ->
+            Opts =
+                if
+                    Conflicts -> [conflicts | DocOptions];
+                    true -> DocOptions
+                end,
+            ChangesRow =
+                {change, [
+                    {pending, Pending - 1},
+                    {seq, {Seq, uuid(Db), couch_db:owner_of(Epochs, Seq)}},
+                    {id, Id},
+                    {changes, Results},
+                    {deleted, Del}
+                    | if
+                        IncludeDocs -> [doc_member(Db, DocInfo, Opts, Filter)];
+                        true -> []
+                    end
+                ]}
     end,
     ok = rexi:stream2(ChangesRow),
-    {ok, Acc#fabric_changes_acc{seq = Seq, pending = Pending-1}}.
+    {ok, Acc#fabric_changes_acc{seq = Seq, pending = Pending - 1}}.
 
 doc_member(Shard, DocInfo, Opts, Filter) ->
     case couch_db:open_doc(Shard, DocInfo, [deleted | Opts]) of
-    {ok, Doc} ->
-        {doc, maybe_filtered_json_doc(Doc, Opts, Filter)};
-    Error ->
-        Error
+        {ok, Doc} ->
+            {doc, maybe_filtered_json_doc(Doc, Opts, Filter)};
+        Error ->
+            Error
     end.
 
-maybe_filtered_json_doc(Doc, Opts, {selector, _Style, {_Selector, Fields}})
-    when Fields =/= nil ->
+maybe_filtered_json_doc(Doc, Opts, {selector, _Style, {_Selector, Fields}}) when
+    Fields =/= nil
+->
     mango_fields:extract(couch_doc:to_json_obj(Doc, Opts), Fields);
 maybe_filtered_json_doc(Doc, Opts, _Filter) ->
     couch_doc:to_json_obj(Doc, Opts).
 
-
-possible_ancestors(_FullInfo, []) ->
-    [];
-possible_ancestors(FullInfo, MissingRevs) ->
-    #doc_info{revs=RevsInfo} = couch_doc:to_doc_info(FullInfo),
-    LeafRevs = [Rev || #rev_info{rev=Rev} <- RevsInfo],
-    % Find the revs that are possible parents of this rev
-    lists:foldl(fun({LeafPos, LeafRevId}, Acc) ->
-        % this leaf is a "possible ancenstor" of the missing
-        % revs if this LeafPos lessthan any of the missing revs
-        case lists:any(fun({MissingPos, _}) ->
-                LeafPos < MissingPos end, MissingRevs) of
-        true ->
-            [{LeafPos, LeafRevId} | Acc];
-        false ->
-            Acc
-        end
-    end, [], LeafRevs).
-
 make_att_readers([]) ->
     [];
-make_att_readers([#doc{atts=Atts0} = Doc | Rest]) ->
+make_att_readers([#doc{atts = Atts0} = Doc | Rest]) ->
     % % go through the attachments looking for 'follows' in the data,
     % % replace with function that reads the data from MIME stream.
     Atts = [couch_att:transform(data, fun make_att_reader/1, Att) || Att <- Atts0],
     [Doc#doc{atts = Atts} | make_att_readers(Rest)].
 
-make_att_reader({follows, Parser, Ref}) ->
-    fun() ->
-        ParserRef = case get(mp_parser_ref) of
+make_att_reader({follows, Parser, Ref}) when is_pid(Parser) ->
+    % This code will fail if the returned closure is called by a
+    % process other than the one that called make_att_reader/1 in the
+    % first place. The reason we don't put everything inside the
+    % closure is that the `hello_from_writer` message must *always* be
+    % sent to the parser, even if the closure never gets called. Also,
+    % make sure `hello_from_writer` is sent only once for the all the
+    % rest of the possible attachments.
+    WriterPid = self(),
+    ParserRef =
+        case get({mp_parser_ref, Parser}) of
             undefined ->
+                % First time encountering a particular parser pid. Monitor it,
+                % in case it dies, and notify it about us, so it could monitor
+                % us in case we die.
                 PRef = erlang:monitor(process, Parser),
-                put(mp_parser_ref, PRef),
+                put({mp_parser_ref, Parser}, PRef),
+                Parser ! {hello_from_writer, Ref, WriterPid},
                 PRef;
             Else ->
                 Else
+        end,
+    fun() ->
+        % Make sure the closure is always called from the same process which
+        % sent the hello_from_writer message.
+        case self() =:= WriterPid of
+            true -> ok;
+            false -> error({make_att_pid_assertion, self(), WriterPid})
+        end,
+        % Check if parser already died. This is for belt and suspenders mostly,
+        % in case somehow we call the data function again after mp_parser_died
+        % was thrown, so we are not stuck forever waiting for bytes.
+        case get({mp_parser_died, Parser}) of
+            undefined -> ok;
+            AlreadyDiedReason -> throw({mp_parser_died, AlreadyDiedReason})
         end,
         Parser ! {get_bytes, Ref, self()},
         receive
@@ -591,6 +639,7 @@ make_att_reader({follows, Parser, Ref}) ->
                 rexi:reply(attachment_chunk_received),
                 Bytes;
             {'DOWN', ParserRef, _, _, Reason} ->
+                put({mp_parser_died, Parser}, Reason),
                 throw({mp_parser_died, Reason})
         end
     end;
@@ -600,14 +649,20 @@ make_att_reader(Else) ->
     Else.
 
 clean_stack(S) ->
-    lists:map(fun({M,F,A}) when is_list(A) -> {M,F,length(A)}; (X) -> X end, S).
+    lists:map(
+        fun
+            ({M, F, A}) when is_list(A) -> {M, F, length(A)};
+            (X) -> X
+        end,
+        S
+    ).
 
 set_io_priority(DbName, Options) ->
     case lists:keyfind(io_priority, 1, Options) of
-    {io_priority, Pri} ->
-        erlang:put(io_priority, Pri);
-    false ->
-        erlang:put(io_priority, {interactive, DbName})
+        {io_priority, Pri} ->
+            erlang:put(io_priority, Pri);
+        false ->
+            erlang:put(io_priority, {interactive, DbName})
     end,
     case erlang:get(io_priority) of
         {interactive, _} ->
@@ -623,7 +678,6 @@ set_io_priority(DbName, Options) ->
             ok
     end.
 
-
 calculate_start_seq(Db, Node, Seq) ->
     case couch_db:calculate_start_seq(Db, Node, Seq) of
         N when is_integer(N) ->
@@ -637,12 +691,10 @@ calculate_start_seq(Db, Node, Seq) ->
             mem3_rep:find_source_seq(Db, OriginalNode, Uuid, OriginalSeq)
     end.
 
-
 uuid(Db) ->
     Uuid = couch_db:get_uuid(Db),
     Prefix = fabric_util:get_uuid_prefix_len(),
     binary:part(Uuid, {0, Prefix}).
-
 
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").

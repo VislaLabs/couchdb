@@ -39,7 +39,7 @@ ARGS_FILE="${COUCHDB_ARGS_FILE:-$ROOTDIR/etc/vm.args}"
 
 # If present, extract cookie from ERL_FLAGS
 # This is used by the CouchDB Dockerfile and Helm chart
-NODE=$(echo "$ERL_FLAGS" | sed 's/^.*name \([^ ][^ ]*\).*$/\1/g')
+NODE=$(echo "$ERL_FLAGS" | sed -n 's/^.*name \([^ ][^ ]*\).*$/\1/p')
 if test -f "$ARGS_FILE"; then
 # else attempt to extract from vm.args
   ARGS_FILE_COOKIE=$(awk '$1=="-name"{print $2}' "$ARGS_FILE")
@@ -49,17 +49,20 @@ NODE="${NODE:-$DEFAULT_NODE}"
 
 # If present, extract cookie from ERL_FLAGS
 # This is used by the CouchDB Dockerfile and Helm chart
-COOKIE=$(echo "$ERL_FLAGS" | sed 's/^.*setcookie \([^ ][^ ]*\).*$/\1/g')
+COOKIE=$(echo "$ERL_FLAGS" | sed -r '
+  s/.*-setcookie[ ]*['\''](.*)['\''].*/\1/
+  s/.*-setcookie[ ]*["](.*)["].*/\1/
+  s/.*-setcookie[ ]*([^ ]*).*/\1/
+')
 if test -f "$ARGS_FILE"; then
 # else attempt to extract from vm.args
-  ARGS_FILE_COOKIE=$(awk '$1=="-setcookie"{print $2}' "$ARGS_FILE")
+  ARGS_FILE_COOKIE=$(awk '$1=="-setcookie"{st=index($0," "); print substr($0,st+1)}' "$ARGS_FILE" | tr -d \" | tr -d \')
   COOKIE="${COOKIE:-$ARGS_FILE_COOKIE}"
 fi
-COOKIE="${COOKIE:-monster}"
 
 printHelpAndExit() {
   echo "Usage: ${PROGNAME} [OPTION]... [-- <additional Erlang cli options>]"
-  echo "  -c cookie         specify shared Erlang cookie (default: monster)"
+  echo "  -c cookie         specify shared Erlang cookie"
   echo "  -l HOST           specify remsh's host name (default: 127.0.0.1)"
   echo "  -m                use output of \`hostname -f\` as remsh's host name"
   echo "  -n NAME@HOST      specify couchdb's Erlang node name (-name in vm.args)"
@@ -112,15 +115,25 @@ fi
 
 # If present, strip -name or -setcookie from ERL_FLAGS
 # to avoid conflicts with the cli parameters
-ERL_FLAGS_CLEAN=$(echo "$ERL_FLAGS" | sed 's/-setcookie \([^ ][^ ]*\)//g' | sed 's/-name \([^ ][^ ]*\)//g')
+ERL_FLAGS_CLEAN=$(echo "$ERL_FLAGS" | sed -r '
+  s/-setcookie[ ]*['\''].*['\'']//
+  s/-setcookie[ ]*["].*["]//
+  s/-setcookie[ ]*[^ ]*//
+  s/-name[ ]*[^ ]*//
+')
+
+if [ -z "${COOKIE}" ]; then
+    echo "No Erlang cookie could be found, please specify with -c" >&2
+    exit 1
+fi
 
 if [ -z "$TLSCONF" ]; then
   exec env ERL_FLAGS="$ERL_FLAGS_CLEAN" "$BINDIR/erl" -boot "$ROOTDIR/releases/$APP_VSN/start_clean" \
-      -name remsh$$@$LHOST -remsh $NODE -hidden -setcookie $COOKIE \
+      -name remsh$$@$LHOST -remsh $NODE -hidden -setcookie "$COOKIE" \
       "$@"
 else
   exec env ERL_FLAGS="$ERL_FLAGS_CLEAN" "$BINDIR/erl" -boot "$ROOTDIR/releases/$APP_VSN/start_clean" \
-      -name remsh$$@$LHOST -remsh $NODE -hidden -setcookie $COOKIE \
+      -name remsh$$@$LHOST -remsh $NODE -hidden -setcookie "$COOKIE" \
       -proto_dist inet_tls -ssl_dist_optfile $TLSCONF \
       "$@"
 fi

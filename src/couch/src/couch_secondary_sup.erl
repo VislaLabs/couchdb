@@ -15,49 +15,48 @@
 -export([init/1, start_link/0]).
 
 start_link() ->
-    supervisor:start_link({local,couch_secondary_services}, ?MODULE, []).
+    supervisor:start_link({local, couch_secondary_services}, ?MODULE, []).
 
 init([]) ->
     SecondarySupervisors = [
-        {couch_plugin_event,
-            {gen_event, start_link, [{local, couch_plugin}]},
-            permanent,
-            brutal_kill,
-            worker,
-            dynamic}
+        {couch_plugin_event, {gen_event, start_link, [{local, couch_plugin}]}, permanent,
+            brutal_kill, worker, dynamic}
     ],
-    Daemons = [
-        {index_server, {couch_index_server, start_link, []}},
-        {query_servers, {couch_proc_manager, start_link, []}},
-        {vhosts, {couch_httpd_vhost, start_link, []}},
-        {uuids, {couch_uuids, start, []}}
-    ],
+    Daemons =
+        [
+            {query_servers, {couch_proc_manager, start_link, []}},
+            {vhosts, {couch_httpd_vhost, start_link, []}},
+            {uuids, {couch_uuids, start, []}}
+        ] ++ couch_index_servers(),
 
-    MaybeHttp = case http_enabled() of
-        true -> [{httpd, {couch_httpd, start_link, []}}];
-        false -> couch_httpd:set_auth_handlers(), []
-    end,
+    MaybeHttp =
+        case http_enabled() of
+            true ->
+                [{httpd, {couch_httpd, start_link, []}}];
+            false ->
+                couch_httpd:set_auth_handlers(),
+                []
+        end,
 
-    MaybeHttps = case https_enabled() of
-        true -> [{httpsd, {chttpd, start_link, [https]}}];
-        false -> []
-    end,
+    MaybeHttps =
+        case https_enabled() of
+            true -> [{httpsd, {chttpd, start_link, [https]}}];
+            false -> []
+        end,
 
-    Children = SecondarySupervisors ++ [
-        begin
-            {Module, Fun, Args} = Spec,
+    Children =
+        SecondarySupervisors ++
+            [
+                begin
+                    {Module, Fun, Args} = Spec,
 
-            {Name,
-                {Module, Fun, Args},
-                permanent,
-                brutal_kill,
-                worker,
-                [Module]}
-        end
-        || {Name, Spec}
-        <- Daemons ++ MaybeHttp ++ MaybeHttps, Spec /= ""],
-    {ok, {{one_for_one, 50, 3600},
-        couch_epi:register_service(couch_db_epi, Children)}}.
+                    {Name, {Module, Fun, Args}, permanent, brutal_kill, worker, [Module]}
+                end
+             || {Name, Spec} <-
+                    Daemons ++ MaybeHttp ++ MaybeHttps,
+                Spec /= ""
+            ],
+    {ok, {{one_for_one, 50, 3600}, couch_epi:register_service(couch_db_epi, Children)}}.
 
 http_enabled() ->
     config:get_boolean("httpd", "enable", false).
@@ -70,3 +69,11 @@ https_enabled() ->
     LegacySSLEnabled = LegacySSL =:= "{chttpd, start_link, [https]}",
 
     SSLEnabled orelse LegacySSLEnabled.
+
+couch_index_servers() ->
+    N = couch_index_server:num_servers(),
+    [couch_index_server(I) || I <- lists:seq(1, N)].
+
+couch_index_server(N) ->
+    Name = couch_index_server:server_name(N),
+    {Name, {couch_index_server, start_link, [N]}}.

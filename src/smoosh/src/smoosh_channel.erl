@@ -12,25 +12,52 @@
 
 -module(smoosh_channel).
 -behaviour(gen_server).
--vsn(1).
--include_lib("couch/include/couch_db.hrl").
 
 % public api.
 -export([start_link/1, close/1, suspend/1, resume/1, get_status/1]).
--export([enqueue/3, last_updated/2, flush/1]).
+-export([enqueue/3, flush/1]).
+-export([get_status_table/1]).
 
 % gen_server api.
--export([init/1, handle_call/3, handle_cast/2, handle_info/2,
-    code_change/3, terminate/2]).
+-export([
+    init/1,
+    handle_call/3,
+    handle_cast/2,
+    handle_info/2
+]).
 
-% records.
+-define(INDEX_CLEANUP, index_cleanup).
+-define(TIME_WINDOW_MSEC, 60 * 1000).
+-define(CHECKPOINT_INTERVAL_MSEC, 180000).
+
+-ifdef(TEST).
+-define(RE_ENQUEUE_INTERVAL, 50).
+-define(STATUS_UPDATE_INTERVAL_MSEC, 490).
+-else.
+-define(RE_ENQUEUE_INTERVAL, 5000).
+-define(STATUS_UPDATE_INTERVAL_MSEC, 4900).
+-endif.
+
+% If persistence is configured, on startup the channel will try to load its
+% waiting queue from a persisted queue data file. Then, during every
+% CHECKPOINT_INTERVAL_MSEC, it will spawn an checkpointer process to write the
+% persisted queue state to disk.
 
 -record(state, {
-    active=[],
+    % Channel name
     name,
-    waiting=smoosh_priority_queue:new(),
-    paused=true,
-    starting=[]
+    % smoosh_persisted_queue:new() object
+    waiting,
+    % Paused flag. The channel starts in a the paused state.
+    paused = true,
+    % #{Key => Pid}
+    active = #{},
+    % #{Ref => Key}
+    starting = #{},
+    % Monitor reference of the checkpointer process
+    cref,
+    % ETS status table handle. Used to publish channel status.
+    stab
 }).
 
 % public functions.
@@ -47,11 +74,14 @@ resume(ServerRef) ->
 enqueue(ServerRef, Object, Priority) ->
     gen_server:cast(ServerRef, {enqueue, Object, Priority}).
 
-last_updated(ServerRef, Object) ->
-    gen_server:call(ServerRef, {last_updated, Object}).
-
-get_status(ServerRef) ->
-    gen_server:call(ServerRef, status).
+get_status(StatusTab) when is_reference(StatusTab) ->
+    try ets:lookup(StatusTab, status) of
+        [{status, Status}] -> Status;
+        [] -> []
+    catch
+        error:badarg ->
+            []
+    end.
 
 close(ServerRef) ->
     gen_server:call(ServerRef, close).
@@ -59,267 +89,470 @@ close(ServerRef) ->
 flush(ServerRef) ->
     gen_server:call(ServerRef, flush).
 
+get_status_table(ServerRef) ->
+    gen_server:call(ServerRef, get_status_table).
+
 % gen_server functions.
 
 init(Name) ->
+    process_flag(trap_exit, true),
+    process_flag(message_queue_data, off_heap),
+    schedule_check_window(),
+    schedule_update_status(),
+    schedule_checkpoint(),
     schedule_unpause(),
-    erlang:send_after(60 * 1000, self(), check_window),
-    {ok, #state{name=Name}}.
+    STab = ets:new(smoosh_stats, [{read_concurrency, true}]),
+    Waiting = unpersist(Name),
+    State = #state{name = Name, waiting = Waiting, stab = STab},
+    {ok, set_status(State)}.
 
-handle_call({last_updated, Object}, _From, State0) ->
-    {ok, State} = code_change(nil, State0, nil),
-    LastUpdated = smoosh_priority_queue:last_updated(Object, State#state.waiting),
-    {reply, LastUpdated, State};
-
-handle_call(suspend, _From, State0) ->
-    {ok, State} = code_change(nil, State0, nil),
-    #state{active = Active} = State,
-    [catch erlang:suspend_process(Pid, [unless_suspending])
-        || {_,Pid} <- Active],
-    {reply, ok, State#state{paused=true}};
-
-handle_call(resume, _From, State0) ->
-    {ok, State} = code_change(nil, State0, nil),
-    #state{active = Active} = State,
-    [catch erlang:resume_process(Pid) || {_,Pid} <- Active],
-    {reply, ok, State#state{paused=false}};
-
-handle_call(status, _From, State0) ->
-    {ok, State} = code_change(nil, State0, nil),
-    {reply, {ok, [
-        {active, length(State#state.active)},
-        {starting, length(State#state.starting)},
-        {waiting, smoosh_priority_queue:info(State#state.waiting)}
-    ]}, State};
-
-handle_call(close, _From, State0) ->
-    {ok, State} = code_change(nil, State0, nil),
+handle_call(get_status_table, _From, #state{} = State) ->
+    State1 = set_status(State),
+    {reply, {ok, State#state.stab}, State1};
+handle_call(suspend, _From, #state{} = State) ->
+    {reply, ok, do_suspend(State)};
+handle_call(resume, _From, #state{} = State) ->
+    {reply, ok, do_resume(State)};
+handle_call(close, _From, State) ->
     {stop, normal, ok, State};
+handle_call(flush, _From, #state{waiting = Q} = State) ->
+    State1 = State#state{waiting = smoosh_priority_queue:flush(Q)},
+    smoosh_persist:persist(State1#state.waiting, #{}, #{}),
+    State2 = set_status(State1),
+    {reply, ok, State2}.
 
-handle_call(flush, _From, State0) ->
-    {ok, State} = code_change(nil, State0, nil),
-    {reply, ok, State#state{waiting=smoosh_priority_queue:new()}}.
+handle_cast({enqueue, Object, Priority}, #state{} = State) ->
+    State1 = add_to_queue(Object, Priority, State),
+    {noreply, maybe_start_compaction(State1)}.
 
-handle_cast({enqueue, _Object, 0}, State0) ->
-    {ok, State} = code_change(nil, State0, nil),
-    {noreply, State};
-handle_cast({enqueue, Object, Priority}, State0) ->
-    {ok, State} = code_change(nil, State0, nil),
-    {noreply, maybe_start_compaction(add_to_queue(Object, Priority, State))}.
-
+handle_info({'DOWN', Ref, _, _, _}, #state{cref = Ref} = State) ->
+    {noreply, State#state{cref = undefined}};
 % We accept noproc here due to possibly having monitored a restarted compaction
 % pid after it finished.
-handle_info({'DOWN', Ref, _, Job, Reason}, State0)  when Reason == normal;
-        Reason == noproc ->
-    {ok, State} = code_change(nil, State0, nil),
-    #state{active=Active, starting=Starting} = State,
-    {noreply, maybe_start_compaction(
-                State#state{active=lists:keydelete(Job, 2, Active),
-                            starting=lists:keydelete(Ref, 1, Starting)})};
-
-handle_info({'DOWN', Ref, _, Job, Reason}, State0) ->
-    {ok, State} = code_change(nil, State0, nil),
-    #state{active=Active0, starting=Starting0} = State,
-    case lists:keytake(Job, 2, Active0) of
-        {value, {Key, _Pid}, Active1} ->
-            State1 = maybe_remonitor_cpid(State#state{active=Active1}, Key,
-                Reason),
-            {noreply, maybe_start_compaction(State1)};
-        false ->
-            case lists:keytake(Ref, 1, Starting0) of
-                {value, {_, Key}, Starting1} ->
-                    couch_log:warning("failed to start compaction of ~p: ~p", [
-                        smoosh_utils:stringify(Key), Reason]),
-                    {ok, _} = timer:apply_after(5000, smoosh_server, enqueue, [Key]),
-                    {noreply, maybe_start_compaction(State#state{starting=Starting1})};
-                false ->
+handle_info({'DOWN', Ref, _, Job, Reason}, #state{} = State) when
+    Reason == normal;
+    Reason == noproc
+->
+    #state{active = Active, starting = Starting} = State,
+    Active1 = maps:filter(fun(_, Pid) -> Pid =/= Job end, Active),
+    Starting1 = maps:remove(Ref, Starting),
+    State1 = State#state{active = Active1, starting = Starting1},
+    {noreply, maybe_start_compaction(State1)};
+handle_info({'DOWN', Ref, _, Job, Reason}, #state{} = State) ->
+    #state{name = Name, active = Active, starting = Starting} = State,
+    FoundActive = maps:filter(fun(_, Pid) -> Pid =:= Job end, Active),
+    case maps:to_list(FoundActive) of
+        [{Key, _Pid}] ->
+            Active1 = maps:without([Key], Active),
+            State1 = State#state{active = maps:without([Key], Active1)},
+            State2 = maybe_remonitor_cpid(State1, Key, Reason),
+            {noreply, maybe_start_compaction(State2)};
+        [] ->
+            case maps:take(Ref, Starting) of
+                {Key, Starting1} ->
+                    LogMsg = "~s : failed to start compaction of ~p: ~p",
+                    LogArgs = [Name, smoosh_utils:stringify(Key), Reason],
+                    couch_log:warning(LogMsg, LogArgs),
+                    re_enqueue(Key),
+                    State1 = State#state{starting = Starting1},
+                    {noreply, maybe_start_compaction(State1)};
+                error ->
                     {noreply, State}
             end
     end;
-
-handle_info({Ref, {ok, Pid}}, State0) when is_reference(Ref) ->
-    {ok, State} = code_change(nil, State0, nil),
-    case lists:keytake(Ref, 1, State#state.starting) of
-        {value, {_, Key}, Starting1} ->
-            couch_log:notice("~s: Started compaction for ~s",
-                     [State#state.name, smoosh_utils:stringify(Key)]),
+% This is the '$gen_call' response handling
+handle_info({Ref, {ok, Pid}}, #state{} = State) when is_reference(Ref) ->
+    #state{name = Name, active = Active, starting = Starting} = State,
+    case maps:take(Ref, Starting) of
+        {Key, Starting1} ->
+            Level = smoosh_utils:log_level("compaction_log_level", "notice"),
+            LogMsg = "~s: Started compaction for ~s",
+            LogArgs = [Name, smoosh_utils:stringify(Key)],
+            couch_log:Level(LogMsg, LogArgs),
             erlang:monitor(process, Pid),
             erlang:demonitor(Ref, [flush]),
-            {noreply, State#state{active=[{Key, Pid}|State#state.active],
-                                  starting=Starting1}};
-        false ->
+            Active1 = Active#{Key => Pid},
+            State1 = State#state{active = Active1, starting = Starting1},
+            {noreply, set_status(State1)};
+        error ->
             {noreply, State}
     end;
-
-handle_info(check_window, State0) ->
-    {ok, State} = code_change(nil, State0, nil),
+handle_info(check_window, State) ->
     #state{paused = Paused, name = Name} = State,
     StrictWindow = smoosh_utils:get(Name, "strict_window", "false"),
-    FinalState = case {not Paused, smoosh_utils:in_allowed_window(Name)} of
-        {false, false} ->
-            % already in desired state
-            State;
-        {true, true} ->
-            % already in desired state
-            State;
-        {false, true} ->
-            % resume is always safe even if we did not previously suspend
-            {reply, ok, NewState} = handle_call(resume, nil, State),
-            NewState;
-        {true, false} ->
-            if StrictWindow =:= "true" ->
-                {reply, ok, NewState} = handle_call(suspend, nil, State),
-                NewState;
-            true ->
-                State#state{paused=true}
-            end
-    end,
-    erlang:send_after(60 * 1000, self(), check_window),
+    FinalState =
+        case {not Paused, smoosh_utils:in_allowed_window(Name)} of
+            {false, false} ->
+                % already in desired state
+                State;
+            {true, true} ->
+                % already in desired state
+                State;
+            {false, true} ->
+                % resume is always safe even if we did not previously suspend
+                do_resume(State);
+            {true, false} when StrictWindow =:= "true" ->
+                % suspend immediately
+                do_suspend(State);
+            {true, false} ->
+                % prevent new jobs from starting, active ones keep running
+                State#state{paused = true}
+        end,
+    schedule_check_window(),
     {noreply, FinalState};
-
-handle_info(pause, State0) ->
-    {ok, State} = code_change(nil, State0, nil),
-    {noreply, State#state{paused=true}};
-handle_info(unpause, State0) ->
-    {ok, State} = code_change(nil, State0, nil),
-    {noreply, maybe_start_compaction(State#state{paused=false})}.
-
-terminate(_Reason, _State) ->
-    ok.
-
-code_change(_OldVsn, #state{}=State, _Extra) ->
-    {ok, State}.
+handle_info(update_status, #state{} = State) ->
+    schedule_update_status(),
+    {noreply, set_status(State)};
+handle_info(checkpoint, #state{cref = Ref} = State) when is_reference(Ref) ->
+    % If a checkpointer process is still running, don't start another one.
+    schedule_checkpoint(),
+    {noreply, State};
+handle_info(checkpoint, #state{cref = undefined} = State) ->
+    % Start an asyncronous checkpoint process so we don't block the channel
+    #state{waiting = Waiting, active = Active, starting = Starting} = State,
+    Args = [Waiting, Active, Starting],
+    {_, Ref} = spawn_monitor(smoosh_persist, persist, Args),
+    schedule_checkpoint(),
+    {noreply, State#state{cref = Ref}};
+handle_info(unpause, State) ->
+    {noreply, maybe_start_compaction(State#state{paused = false})}.
 
 % private functions.
 
+unpersist(Name) ->
+    % Insert into the access table with a current
+    % timestamp to prevent the same dbs from being re-enqueued
+    % again after startup
+    Waiting = smoosh_persist:unpersist(Name),
+    MapFun = fun(Object, _Priority) ->
+        smoosh_server:update_access(Object)
+    end,
+    maps:map(MapFun, smoosh_priority_queue:to_map(Waiting)),
+    Waiting.
+
+% Periodically cache in status ets table to avoid having to block on gen_server
+% get_status() calls.
+%
+set_status(#state{} = State) ->
+    #state{active = Active, starting = Starting, waiting = Waiting} = State,
+    Status = [
+        {active, map_size(Active)},
+        {starting, map_size(Starting)},
+        {waiting, smoosh_priority_queue:info(Waiting)}
+    ],
+    true = ets:insert(State#state.stab, {status, Status}),
+    State.
+
 add_to_queue(Key, Priority, State) ->
-    #state{active=Active,waiting=Q} = State,
-    case lists:keymember(Key, 1, Active) of
-    true ->
-        State;
-    false ->
-        Capacity = list_to_integer(smoosh_utils:get(State#state.name, "capacity", "9999")),
-        couch_log:notice(
-            "~s: adding ~p to internal compactor queue with priority ~p",
-                 [State#state.name, Key, Priority]),
-        State#state{
-            waiting=smoosh_priority_queue:in(Key, Priority, Priority, Capacity, Q)
-        }
+    #state{name = Name, active = Active, waiting = Q} = State,
+    case is_map_key(Key, Active) of
+        true ->
+            State;
+        false ->
+            Capacity = smoosh_utils:capacity(State#state.name),
+            Level = smoosh_utils:log_level("compaction_log_level", "notice"),
+            LogMsg = "~s: enqueueing ~p to compact with priority ~p",
+            LogArgs = [Name, Key, Priority],
+            couch_log:Level(LogMsg, LogArgs),
+            Q1 = smoosh_priority_queue:in(Key, Priority, Capacity, Q),
+            State#state{waiting = Q1}
     end.
 
-maybe_start_compaction(#state{paused=true}=State) ->
+maybe_start_compaction(#state{paused = true} = State) ->
     State;
-maybe_start_compaction(State) ->
-    Concurrency = list_to_integer(smoosh_utils:get(State#state.name,
-        "concurrency", "1")),
-    if length(State#state.active) + length(State#state.starting) < Concurrency ->
-        case smoosh_priority_queue:out(State#state.waiting) of
+maybe_start_compaction(#state{paused = false, name = Name} = State) ->
+    Concurrency = smoosh_utils:concurrency(Name),
+    maybe_start_compaction(Concurrency, State).
+
+maybe_start_compaction(Concurrency, #state{active = A, starting = S} = State) when
+    map_size(A) + map_size(S) >= Concurrency
+->
+    State;
+maybe_start_compaction(Concurrency, #state{} = State) ->
+    case smoosh_priority_queue:out(State#state.waiting) of
         false ->
             State;
-        {Key, Priority, Q} ->
-            try
-                State2 = case start_compact(State, Key) of
-                false ->
-                    State;
-                State1 ->
-                    couch_log:notice(
-                        "~s: Starting compaction for ~s (priority ~p)",
-                        [State#state.name, smoosh_utils:stringify(Key), Priority]),
-                    State1
+        {Key, Q} ->
+            State1 = State#state{waiting = Q},
+            % Re-check priority since by the time the object was in queue, or
+            % was un-persisted after a node was down, the db or ddoc might be
+            % long gone and we don't want to crash the channel attemping to
+            % compact it
+            State2 =
+                case priority(State1, Key) of
+                    0 -> State1;
+                    _ -> try_compact(State1, Key)
                 end,
-                maybe_start_compaction(State2#state{waiting=Q})
-            catch Class:Exception ->
-                couch_log:notice("~s: ~p ~p for ~s",
-                    [State#state.name, Class, Exception,
-                        smoosh_utils:stringify(Key)]),
-                maybe_start_compaction(State#state{waiting=Q})
-            end
-        end;
-    true ->
-        State
+            maybe_start_compaction(Concurrency, State2)
     end.
 
-start_compact(State, {schema, DbName, GroupId}) ->
-    case smoosh_utils:ignore_db({DbName, GroupId}) of
+priority(#state{name = Name}, Key) ->
+    try
+        smoosh_server:get_priority(Name, Key)
+    catch
+        Tag:Error ->
+            % We are being defensive as we don't want to crash the channel
+            Level = smoosh_utils:log_level("compaction_log_level", "notice"),
+            LogMsg = "~s: Failed to get priority for ~s in queue ~p:~p",
+            LogArgs = [Name, smoosh_utils:stringify(Key), Tag, Error],
+            couch_log:Level(LogMsg, LogArgs),
+            0
+    end.
+
+try_compact(#state{name = Name} = State, Key) ->
+    try start_compact(State, Key) of
         false ->
-            {ok, Pid} = couch_md_index_manager:get_group_pid(DbName,
-                GroupId),
-            Ref = erlang:monitor(process, Pid),
-            Pid ! {'$gen_call', {self(), Ref}, compact},
-            State#state{starting=[{Ref, {schema, DbName,
-                GroupId}} | State#state.starting]};
+            State;
+        #state{} = State1 ->
+            Level = smoosh_utils:log_level("compaction_log_level", "notice"),
+            LogMsg = "~s: Starting compaction for ~s",
+            LogArgs = [Name, smoosh_utils:stringify(Key)],
+            couch_log:Level(LogMsg, LogArgs),
+            State1
+    catch
+        Class:Exception ->
+            LogArgs = [Name, Class, Exception, smoosh_utils:stringify(Key)],
+            couch_log:warning("~s: compaction error ~p:~p for ~s", LogArgs),
+            State
+    end.
+
+start_compact(#state{} = State, {?INDEX_CLEANUP, DbName} = Key) ->
+    #state{name = Name, active = Active} = State,
+    case smoosh_utils:ignore_db(DbName) of
+        false ->
+            {Pid, _Ref} = spawn_monitor(fun() -> cleanup_index_files(DbName) end),
+            Level = smoosh_utils:log_level("compaction_log_level", "notice"),
+            LogMsg = "~s: Starting index cleanup for ~s",
+            LogArgs = [Name, smoosh_utils:stringify(Key)],
+            couch_log:Level(LogMsg, LogArgs),
+            State#state{active = Active#{Key => Pid}};
         _ ->
             false
     end;
-
-start_compact(State, DbName) when is_list(DbName) ->
-    start_compact(State, ?l2b(DbName));
-start_compact(State, DbName) when is_binary(DbName) ->
-    {ok, Db} = couch_db:open_int(DbName, []),
-    try start_compact(State, Db) after couch_db:close(Db) end;
-start_compact(State, {Shard,GroupId}) ->
-    case smoosh_utils:ignore_db({Shard, GroupId}) of
-    false ->
-        DbName = mem3:dbname(Shard),
-        {ok, Pid} = couch_index_server:get_index(
-                couch_mrview_index, Shard, GroupId),
-        spawn(fun() -> cleanup_index_files(DbName, Shard) end),
-        Ref = erlang:monitor(process, Pid),
-        Pid ! {'$gen_call', {self(), Ref}, compact},
-        State#state{starting=[{Ref, {Shard, GroupId}}|State#state.starting]};
-    _ ->
-        false
+start_compact(#state{name = Name} = State, DbName) when is_binary(DbName) ->
+    case couch_db:open_int(DbName, []) of
+        {ok, Db} ->
+            try
+                start_compact(State, Db)
+            after
+                couch_db:close(Db)
+            end;
+        Error = {not_found, no_db_file} ->
+            LogMsg = "~s : Error starting compaction for ~p: ~p",
+            LogArgs = [Name, smoosh_utils:stringify(DbName), Error],
+            couch_log:warning(LogMsg, LogArgs),
+            false
     end;
-start_compact(State, Db) ->
-    case smoosh_utils:ignore_db(Db) of
-    false ->
-        DbPid = couch_db:get_pid(Db),
-        Key = couch_db:name(Db),
-        case couch_db:get_compactor_pid(Db) of
-            nil ->
-                Ref = erlang:monitor(process, DbPid),
-                DbPid ! {'$gen_call', {self(), Ref}, start_compact},
-                State#state{starting=[{Ref, Key}|State#state.starting]};
-            % Compaction is already running, so monitor existing compaction pid.
-            CPid ->
-                couch_log:notice("Db ~s continuing compaction",
-                    [smoosh_utils:stringify(Key)]),
-                erlang:monitor(process, CPid),
-                State#state{active=[{Key, CPid}|State#state.active]}
-        end;
-    _ ->
-        false
+start_compact(#state{} = State, {Shard, GroupId} = Key) ->
+    #state{name = Name, starting = Starting} = State,
+    case smoosh_utils:ignore_db({Shard, GroupId}) of
+        false ->
+            case couch_index_server:get_index(couch_mrview_index, Shard, GroupId) of
+                {ok, Pid} ->
+                    schedule_cleanup_index_files(Shard),
+                    Ref = erlang:monitor(process, Pid),
+                    Pid ! {'$gen_call', {self(), Ref}, compact},
+                    State#state{starting = Starting#{Ref => Key}};
+                Error ->
+                    LogMsg = "~s : Error starting view compaction for ~p: ~p",
+                    LogArgs = [Name, smoosh_utils:stringify(Key), Error],
+                    couch_log:warning(LogMsg, LogArgs),
+                    false
+            end;
+        _ ->
+            false
+    end;
+start_compact(#state{} = State, Db) ->
+    #state{name = Name, starting = Starting, active = Active} = State,
+    Key = couch_db:name(Db),
+    case smoosh_utils:ignore_db(Key) of
+        false ->
+            case couch_db:get_compactor_pid(Db) of
+                nil ->
+                    DbPid = couch_db:get_pid(Db),
+                    Ref = erlang:monitor(process, DbPid),
+                    DbPid ! {'$gen_call', {self(), Ref}, start_compact},
+                    State#state{starting = Starting#{Ref => Key}};
+                % Compaction is already running, so monitor existing compaction pid.
+                CPid when is_pid(CPid) ->
+                    erlang:monitor(process, CPid),
+                    Level = smoosh_utils:log_level("compaction_log_level", "notice"),
+                    LogMsg = "~s : db ~s continuing compaction",
+                    LogArgs = [Name, smoosh_utils:stringify(Key)],
+                    couch_log:Level(LogMsg, LogArgs),
+                    State#state{active = Active#{Key => CPid}}
+            end;
+        _ ->
+            false
     end.
 
-maybe_remonitor_cpid(State, DbName, Reason) when is_binary(DbName) ->
-    {ok, Db} = couch_db:open_int(DbName, []),
-    case couch_db:get_compactor_pid_sync(Db) of
-        nil ->
-            couch_log:warning("exit for compaction of ~p: ~p",
-                [smoosh_utils:stringify(DbName), Reason]),
-            {ok, _} = timer:apply_after(5000, smoosh_server, enqueue, [DbName]),
-            State;
-        CPid ->
-            couch_log:notice("~s compaction already running. Re-monitor Pid ~p",
-                [smoosh_utils:stringify(DbName), CPid]),
-            erlang:monitor(process, CPid),
-            State#state{active=[{DbName, CPid}|State#state.active]}
+maybe_remonitor_cpid(#state{} = State, DbName, Reason) when is_binary(DbName) ->
+    #state{name = Name, active = Active} = State,
+    case couch_db:open_int(DbName, []) of
+        {ok, Db} ->
+            try couch_db:get_compactor_pid_sync(Db) of
+                nil ->
+                    LogMsg = "~s : exit for compaction of ~p: ~p",
+                    LogArgs = [Name, smoosh_utils:stringify(DbName), Reason],
+                    couch_log:warning(LogMsg, LogArgs),
+                    re_enqueue(DbName),
+                    State;
+                CPid when is_pid(CPid) ->
+                    erlang:monitor(process, CPid),
+                    Level = smoosh_utils:log_level("compaction_log_level", "notice"),
+                    LogMsg = "~s: ~s compaction already running. Re-monitor Pid ~p",
+                    LogArgs = [Name, smoosh_utils:stringify(DbName), CPid],
+                    couch_log:Level(LogMsg, LogArgs),
+                    State#state{active = Active#{DbName => CPid}}
+            catch
+                _:Error ->
+                    LogMsg = "~s: error remonitoring db compaction ~p error:~p",
+                    LogArgs = [Name, smoosh_utils:stringify(DbName), Error],
+                    couch_log:warning(LogMsg, LogArgs),
+                    re_enqueue(DbName),
+                    State
+            end;
+        Error = {not_found, no_db_file} ->
+            LogMsg = "~s : exit for compaction of ~p: ~p",
+            LogArgs = [Name, smoosh_utils:stringify(DbName), Error],
+            couch_log:warning(LogMsg, LogArgs),
+            State
     end;
 % not a database compaction, so ignore the pid check
-maybe_remonitor_cpid(State, Key, Reason) ->
-    couch_log:warning("exit for compaction of ~p: ~p",
-        [smoosh_utils:stringify(Key), Reason]),
-    {ok, _} = timer:apply_after(5000, smoosh_server, enqueue, [Key]),
+maybe_remonitor_cpid(#state{name = Name} = State, Key, Reason) ->
+    LogMsg = "~s: exit for compaction of ~p: ~p",
+    LogArgs = [Name, smoosh_utils:stringify(Key), Reason],
+    couch_log:warning(LogMsg, LogArgs),
+    re_enqueue(Key),
     State.
 
+schedule_check_window() ->
+    erlang:send_after(?TIME_WINDOW_MSEC, self(), check_window).
+
+schedule_update_status() ->
+    erlang:send_after(?STATUS_UPDATE_INTERVAL_MSEC, self(), update_status).
+
 schedule_unpause() ->
-    WaitSecs = list_to_integer(config:get("smoosh", "wait_secs", "30")),
+    WaitSecs = config:get_integer("smoosh", "wait_secs", 30),
     erlang:send_after(WaitSecs * 1000, self(), unpause).
 
-cleanup_index_files(DbName, _Shard) ->
-    case config:get("smoosh", "cleanup_index_files", "false") of
-    "true" ->
-        fabric:cleanup_index_files(DbName);
-    _ ->
-        ok
+schedule_checkpoint() ->
+    erlang:send_after(?CHECKPOINT_INTERVAL_MSEC, self(), checkpoint).
+
+re_enqueue(Obj) ->
+    case whereis(smoosh_server) of
+        Pid when is_pid(Pid) ->
+            Cast = {'$gen_cast', {enqueue, Obj}},
+            erlang:send_after(?RE_ENQUEUE_INTERVAL, Pid, Cast),
+            ok;
+        _ ->
+            ok
     end.
+
+cleanup_index_files(DbName) ->
+    case should_clean_up_indices() of
+        true -> fabric:cleanup_index_files(DbName);
+        false -> ok
+    end.
+
+schedule_cleanup_index_files(Shard) ->
+    case should_clean_up_indices() of
+        true ->
+            % Since cleanup is at the cluster level, schedule it with a chance
+            % inversely proportional to the number of local shards
+            DbName = mem3:dbname(Shard),
+            try length(mem3:local_shards(DbName)) of
+                ShardCount when ShardCount >= 1 ->
+                    case rand:uniform() < (1 / ShardCount) of
+                        true ->
+                            Arg = {?INDEX_CLEANUP, DbName},
+                            smoosh_server:enqueue(Arg);
+                        false ->
+                            ok
+                    end;
+                _ ->
+                    ok
+            catch
+                error:database_does_not_exist ->
+                    ok
+            end;
+        false ->
+            ok
+    end.
+
+should_clean_up_indices() ->
+    config:get_boolean("smoosh", "cleanup_index_files", true).
+
+do_suspend(#state{active = Active} = State) ->
+    [suspend_pid(Pid) || Pid <- maps:values(Active)],
+    State#state{paused = true}.
+
+do_resume(#state{active = Active} = State) ->
+    [resume_pid(Pid) || Pid <- maps:values(Active)],
+    State#state{paused = false}.
+
+suspend_pid(Pid) when is_pid(Pid) ->
+    catch erlang:suspend_process(Pid, [unless_suspending]).
+
+resume_pid(Pid) when is_pid(Pid) ->
+    catch erlang:resume_process(Pid).
+
+-ifdef(TEST).
+
+-include_lib("couch/include/couch_eunit.hrl").
+
+start_compact_errors_test_() ->
+    {
+        foreach,
+        fun setup_purge_seq/0,
+        fun teardown_purge_seq/1,
+        [
+            ?TDEF_FE(t_start_db_with_missing_db),
+            ?TDEF_FE(t_start_view_with_missing_db),
+            ?TDEF_FE(t_start_view_with_missing_index),
+            ?TDEF_FE(t_start_compact_throws)
+        ]
+    }.
+
+setup_purge_seq() ->
+    meck:new(couch_log, [passthrough]),
+    meck:new(couch_db, [passthrough]),
+    meck:new(smoosh_utils, [passthrough]),
+    Ctx = test_util:start_couch(),
+    DbName = ?tempdb(),
+    {ok, Db} = couch_server:create(DbName, []),
+    couch_db:close(Db),
+    {Ctx, DbName}.
+
+teardown_purge_seq({Ctx, DbName}) ->
+    couch_server:delete(DbName, []),
+    test_util:stop_couch(Ctx),
+    meck:unload().
+
+t_start_db_with_missing_db({_, _}) ->
+    State = #state{name = "ratio_dbs"},
+    meck:reset(couch_log),
+    try_compact(State, <<"missing_db">>),
+    ?assertEqual(1, meck:num_calls(couch_log, warning, 2)).
+
+t_start_view_with_missing_db({_, _}) ->
+    State = #state{name = "ratio_views"},
+    meck:reset(couch_log),
+    try_compact(State, {<<"missing_db">>, <<"_design/nope">>}),
+    ?assertEqual(1, meck:num_calls(couch_log, warning, 2)).
+
+t_start_view_with_missing_index({_, DbName}) ->
+    State = #state{name = "ratio_views"},
+    meck:reset(couch_log),
+    try_compact(State, {DbName, <<"_design/nope">>}),
+    ?assertEqual(1, meck:num_calls(couch_log, warning, 2)).
+
+t_start_compact_throws({_, _}) ->
+    State = #state{name = "ratio_dbs"},
+    % Make something explode inside start_compact, so pick smoosh_util:ignore/1
+    meck:expect(smoosh_utils, ignore_db, 1, meck:raise(error, foo)),
+    meck:reset(couch_log),
+    try_compact(State, {<<"some_db">>, <<"_design/some_view">>}),
+    ?assertEqual(1, meck:num_calls(couch_log, warning, 2)).
+
+-endif.

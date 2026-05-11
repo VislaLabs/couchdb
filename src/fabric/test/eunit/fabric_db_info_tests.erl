@@ -12,36 +12,26 @@
 
 -module(fabric_db_info_tests).
 
-
 -include_lib("couch/include/couch_eunit.hrl").
--include_lib("couch/include/couch_db.hrl").
--include_lib("mem3/include/mem3.hrl").
-
-
--define(TDEF(A), {atom_to_list(A), fun A/0}).
-
 
 main_test_() ->
     {
         setup,
         fun setup/0,
         fun teardown/1,
-        [
+        with([
             ?TDEF(t_update_seq_has_uuids)
-        ]
+        ])
     }.
-
 
 setup() ->
     test_util:start_couch([fabric]).
-
 
 teardown(Ctx) ->
     meck:unload(),
     test_util:stop_couch(Ctx).
 
-
-t_update_seq_has_uuids() ->
+t_update_seq_has_uuids(_) ->
     DbName = ?tempdb(),
     ok = fabric:create_db(DbName, [{q, 1}, {n, 1}]),
 

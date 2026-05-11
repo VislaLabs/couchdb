@@ -38,25 +38,31 @@
 {{node_name}}
 
 # All nodes must share the same magic cookie for distributed Erlang to work.
-# Comment out this line if you synchronized the cookies by other means (using
-# the ~/.erlang.cookie file, for example).
--setcookie monster
+# Uncomment the following line and append a securely generated random value.
+# -setcookie
+
+# Which interfaces should the node listen on?
+-kernel inet_dist_use_interface {127,0,0,1}
 
 # Tell kernel and SASL not to log anything
 -kernel error_logger silent
 -sasl sasl_error_logger false
 
-# Use kernel poll functionality if supported by emulator
-+K true
+# This will toggle to true in Erlang 25+. However since we don't use global
+# any longer, and have our own auto-connection module, we can keep the
+# existing global behavior to avoid surprises. See
+# https://github.com/erlang/otp/issues/6470#issuecomment-1337421210 for more
+# information about possible increased coordination and messages being sent on
+# disconnections when this setting is enabled.
+#
+-kernel prevent_overlapping_partitions false
 
-# Start a pool of asynchronous IO threads
-+A 16
+# Increase the pool of dirty IO schedulers from 10 to 16
+# Dirty IO schedulers are used for file IO.
++SDio 16
 
 # Comment this line out to enable the interactive Erlang shell on startup
 +Bd -noinput
-
-# Force use of the smp scheduler, fixes #1296
--smp enable
 
 # Set maximum SSL session lifetime to reap terminated replication readers
 -ssl session_lifetime 300
@@ -91,5 +97,5 @@
 ## Don't forget to override the paths to point to your certificate(s) and key(s)!
 ##
 #-proto_dist couch
-#-couch_dist no_tls \"clouseau@127.0.0.1\"
+#-couch_dist no_tls '"clouseau@127.0.0.1"'
 #-ssl_dist_optfile <path/to/couch_ssl_dist.conf>

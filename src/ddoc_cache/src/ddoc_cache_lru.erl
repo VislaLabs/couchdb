@@ -14,7 +14,6 @@
 -behaviour(gen_server).
 -vsn(1).
 
-
 -export([
     start_link/0,
     open/1,
@@ -35,23 +34,18 @@
     handle_db_event/3
 ]).
 
-
 -include("ddoc_cache.hrl").
 
-
--define(OPENER, ddoc_cache_opener).
-
-
 -record(st, {
-    pids, % pid -> key
-    dbs, % dbname -> docid -> key -> pid
+    % pid -> key
+    pids,
+    % dbname -> docid -> key -> pid
+    dbs,
     evictor
 }).
 
-
 start_link() ->
     gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
-
 
 open(Key) ->
     try ets:lookup(?CACHE, Key) of
@@ -66,11 +60,11 @@ open(Key) ->
             couch_stats:increment_counter([ddoc_cache, hit]),
             ddoc_cache_entry:accessed(Pid),
             {ok, Val}
-    catch _:_ ->
-        couch_stats:increment_counter([ddoc_cache, recovery]),
-        ddoc_cache_entry:recover(Key)
+    catch
+        _:_ ->
+            couch_stats:increment_counter([ddoc_cache, recovery]),
+            ddoc_cache_entry:recover(Key)
     end.
-
 
 insert(Key, Value) ->
     case ets:lookup(?CACHE, Key) of
@@ -81,27 +75,26 @@ insert(Key, Value) ->
             ok
     end.
 
-
 refresh(DbName, DDocIds) ->
     gen_server:cast(?MODULE, {refresh, DbName, DDocIds}).
-
 
 init(_) ->
     couch_util:set_mqd_off_heap(?MODULE),
     process_flag(trap_exit, true),
     BaseOpts = [public, named_table],
-    CacheOpts = [
-        set,
-        {read_concurrency, true},
-        {keypos, #entry.key}
-    ] ++ BaseOpts,
+    CacheOpts =
+        [
+            set,
+            {read_concurrency, true},
+            {keypos, #entry.key}
+        ] ++ BaseOpts,
     ets:new(?CACHE, CacheOpts),
     ets:new(?LRU, [ordered_set, {write_concurrency, true}] ++ BaseOpts),
     {ok, Pids} = khash:new(),
     {ok, Dbs} = khash:new(),
     {ok, Evictor} = couch_event:link_listener(
-            ?MODULE, handle_db_event, nil, [all_dbs]
-        ),
+        ?MODULE, handle_db_event, nil, [all_dbs]
+    ),
     ?EVENT(lru_init, nil),
     {ok, #st{
         pids = Pids,
@@ -109,14 +102,12 @@ init(_) ->
         evictor = Evictor
     }}.
 
-
 terminate(_Reason, St) ->
     case is_pid(St#st.evictor) of
         true -> exit(St#st.evictor, kill);
         false -> ok
     end,
     ok.
-
 
 handle_call({start, Key, Default}, _From, St) ->
     #st{
@@ -141,40 +132,43 @@ handle_call({start, Key, Default}, _From, St) ->
         [#entry{pid = Pid}] ->
             {reply, {ok, Pid}, St}
     end;
-
 handle_call(Msg, _From, St) ->
     {stop, {invalid_call, Msg}, {invalid_call, Msg}, St}.
 
-
 handle_cast({evict, DbName}, St) ->
-    gen_server:abcast(mem3:nodes(), ?OPENER, {do_evict, DbName}),
+    gen_server:abcast(mem3:nodes(), ?MODULE, {do_evict, DbName}),
     {noreply, St};
-
 handle_cast({refresh, DbName, DDocIds}, St) ->
-    gen_server:abcast(mem3:nodes(), ?OPENER, {do_evict, DbName, DDocIds}),
+    gen_server:abcast(mem3:nodes(), ?MODULE, {do_refresh, DbName, DDocIds}),
     {noreply, St};
-
 handle_cast({do_evict, DbName}, St) ->
     #st{
         dbs = Dbs
     } = St,
-    ToRem = case khash:lookup(Dbs, DbName) of
-        {value, DDocIds} ->
-            AccOut = khash:fold(DDocIds, fun(_, Keys, Acc1) ->
-                khash:to_list(Keys) ++ Acc1
-            end, []),
-            ?EVENT(evicted, DbName),
-            AccOut;
-        not_found ->
-            ?EVENT(evict_noop, DbName),
-            []
-    end,
-    lists:foreach(fun({Key, Pid}) ->
-        remove_entry(St, Key, Pid)
-    end, ToRem),
+    ToRem =
+        case khash:lookup(Dbs, DbName) of
+            {value, DDocIds} ->
+                AccOut = khash:fold(
+                    DDocIds,
+                    fun(_, Keys, Acc1) ->
+                        khash:to_list(Keys) ++ Acc1
+                    end,
+                    []
+                ),
+                ?EVENT(evicted, DbName),
+                AccOut;
+            not_found ->
+                ?EVENT(evict_noop, DbName),
+                []
+        end,
+    lists:foreach(
+        fun({Key, Pid}) ->
+            remove_entry(St, Key, Pid)
+        end,
+        ToRem
+    ),
     khash:del(Dbs, DbName),
     {noreply, St};
-
 handle_cast({do_refresh, DbName, DDocIdList}, St) ->
     #st{
         dbs = Dbs
@@ -185,28 +179,32 @@ handle_cast({do_refresh, DbName, DDocIdList}, St) ->
     % design documents.
     case khash:lookup(Dbs, DbName) of
         {value, DDocIds} ->
-            lists:foreach(fun(DDocId) ->
-                case khash:lookup(DDocIds, DDocId) of
-                    {value, Keys} ->
-                        khash:fold(Keys, fun(_, Pid, _) ->
-                            ddoc_cache_entry:refresh(Pid)
-                        end, nil);
-                    not_found ->
-                        ok
-                end
-            end, [no_ddocid | DDocIdList]);
+            lists:foreach(
+                fun(DDocId) ->
+                    case khash:lookup(DDocIds, DDocId) of
+                        {value, Keys} ->
+                            khash:fold(
+                                Keys,
+                                fun(_, Pid, _) ->
+                                    ddoc_cache_entry:refresh(Pid)
+                                end,
+                                nil
+                            );
+                        not_found ->
+                            ok
+                    end
+                end,
+                [no_ddocid | DDocIdList]
+            );
         not_found ->
             ok
     end,
     {noreply, St};
-
 handle_cast(Msg, St) ->
     {stop, {invalid_cast, Msg}, St}.
 
-
 handle_info({'EXIT', Pid, Reason}, #st{evictor = Pid} = St) ->
     {stop, Reason, St};
-
 handle_info({'EXIT', Pid, normal}, St) ->
     % This clause handles when an entry starts
     % up but encounters an error or uncacheable
@@ -218,34 +216,29 @@ handle_info({'EXIT', Pid, normal}, St) ->
     khash:del(Pids, Pid),
     remove_key(St, Key),
     {noreply, St};
-
 handle_info(Msg, St) ->
     {stop, {invalid_info, Msg}, St}.
-
 
 code_change(_OldVsn, St, _Extra) ->
     {ok, St}.
 
-
 handle_db_event(ShardDbName, created, St) ->
     gen_server:cast(?MODULE, {evict, mem3:dbname(ShardDbName)}),
     {ok, St};
-
 handle_db_event(ShardDbName, deleted, St) ->
     gen_server:cast(?MODULE, {evict, mem3:dbname(ShardDbName)}),
     {ok, St};
-
 handle_db_event(_DbName, _Event, St) ->
     {ok, St}.
-
 
 lru_start(Key, DoInsert) ->
     case gen_server:call(?MODULE, {start, Key, undefined}, infinity) of
         {ok, Pid} ->
             couch_stats:increment_counter([ddoc_cache, miss]),
             Resp = ddoc_cache_entry:open(Pid, Key),
-            if not DoInsert -> ok; true ->
-                ddoc_cache_entry:insert(Key, Resp)
+            if
+                not DoInsert -> ok;
+                true -> ddoc_cache_entry:insert(Key, Resp)
             end,
             Resp;
         full ->
@@ -253,22 +246,22 @@ lru_start(Key, DoInsert) ->
             ddoc_cache_entry:recover(Key)
     end.
 
-
 trim(_, 0) ->
     full;
-
 trim(St, MaxSize) ->
     CurSize = ets:info(?CACHE, memory) * erlang:system_info(wordsize),
-    if CurSize =< MaxSize -> ok; true ->
-        case ets:first(?LRU) of
-            {_Ts, Key, Pid} ->
-                remove_entry(St, Key, Pid),
-                trim(St, MaxSize);
-            '$end_of_table' ->
-                full
-        end
+    if
+        CurSize =< MaxSize ->
+            ok;
+        true ->
+            case ets:first(?LRU) of
+                {_Ts, Key, Pid} ->
+                    remove_entry(St, Key, Pid),
+                    trim(St, MaxSize);
+                '$end_of_table' ->
+                    full
+            end
     end.
-
 
 remove_entry(St, Key, Pid) ->
     #st{
@@ -278,7 +271,6 @@ remove_entry(St, Key, Pid) ->
     ddoc_cache_entry:shutdown(Pid),
     khash:del(Pids, Pid),
     remove_key(St, Key).
-
 
 store_key(Dbs, Key, Pid) ->
     DbName = ddoc_cache_entry:dbname(Key),
@@ -298,25 +290,37 @@ store_key(Dbs, Key, Pid) ->
             khash:put(Dbs, DbName, DDocIds)
     end.
 
-
 remove_key(St, Key) ->
     #st{
         dbs = Dbs
     } = St,
     DbName = ddoc_cache_entry:dbname(Key),
     DDocId = ddoc_cache_entry:ddocid(Key),
-    {value, DDocIds} = khash:lookup(Dbs, DbName),
-    {value, Keys} = khash:lookup(DDocIds, DDocId),
-    khash:del(Keys, Key),
-    case khash:size(Keys) of
-        0 -> khash:del(DDocIds, DDocId);
-        _ -> ok
-    end,
-    case khash:size(DDocIds) of
-        0 -> khash:del(Dbs, DbName);
-        _ -> ok
-    end.
 
+    % For non-existent ddocs, a new ddoc_cache_entry is spawned for
+    % each call to ddoc_cache:open. Multiple calls to open the same
+    % non-existent ddoc will create multiple cache entries with the
+    % same Key but different PIDs. This can result in the following
+    % khash lookups returning not_found, so handle those corner cases.
+    case khash:lookup(Dbs, DbName) of
+        {value, DDocIds} ->
+            case khash:lookup(DDocIds, DDocId) of
+                {value, Keys} ->
+                    ok = khash:del(Keys, Key),
+                    case khash:size(Keys) of
+                        0 -> khash:del(DDocIds, DDocId);
+                        _ -> ok
+                    end,
+                    case khash:size(DDocIds) of
+                        0 -> khash:del(Dbs, DbName);
+                        _ -> ok
+                    end;
+                not_found ->
+                    ok
+            end;
+        not_found ->
+            ok
+    end.
 
 unlink_and_flush(Pid) ->
     erlang:unlink(Pid),

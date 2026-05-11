@@ -12,30 +12,26 @@
 
 -module(ddoc_cache_disabled_test).
 
-
 -include_lib("couch/include/couch_db.hrl").
--include_lib("eunit/include/eunit.hrl").
+-include_lib("couch/include/couch_eunit.hrl").
 -include("ddoc_cache_test.hrl").
-
 
 start_couch() ->
     Ctx = ddoc_cache_tutil:start_couch(),
     config:set("ddoc_cache", "max_size", "0", false),
     Ctx.
 
-
 check_disabled_test_() ->
     {
         setup,
         fun start_couch/0,
         fun ddoc_cache_tutil:stop_couch/1,
-        ddoc_cache_tutil:with([
-            {"resp_ok", fun resp_ok/1},
-            {"resp_not_found", fun resp_not_found/1},
-            {"check_effectively_disabled", fun check_effectively_disabled/1}
+        with([
+            ?TDEF(resp_ok),
+            ?TDEF(resp_not_found),
+            ?TDEF(check_effectively_disabled)
         ])
     }.
-
 
 resp_ok({DbName, _}) ->
     ddoc_cache_tutil:clear(),
@@ -44,14 +40,12 @@ resp_ok({DbName, _}) ->
     ?assertEqual(0, ets:info(?CACHE, size)),
     ?assertEqual(0, ets:info(?LRU, size)).
 
-
 resp_not_found({DbName, _}) ->
     ddoc_cache_tutil:clear(),
     Resp = ddoc_cache:open_doc(DbName, <<"_design/not_found">>),
     ?assertEqual({not_found, missing}, Resp),
     ?assertEqual(0, ets:info(?CACHE, size)),
     ?assertEqual(0, ets:info(?LRU, size)).
-
 
 check_effectively_disabled({DbName, _}) ->
     config:set("ddoc_cache", "max_size", "1", false),

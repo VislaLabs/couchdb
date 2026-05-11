@@ -15,7 +15,6 @@
 -vsn(1).
 -behaviour(config_listener).
 
-
 -export([
     start_link/0,
     init/1,
@@ -23,11 +22,10 @@
     handle_config_terminate/3
 ]).
 
-
 -include_lib("couch/include/couch_db.hrl").
 
-
 start_link() ->
+    assert_no_monsters(),
     assert_admins(),
     maybe_launch_admin_annoyance_reporter(),
     write_pidfile(),
@@ -42,43 +40,45 @@ start_link() ->
             Else
     end.
 
-
 init(_Args) ->
     couch_log:info("Starting ~s", [?MODULE]),
-    {ok, {{one_for_one,10, 60}, [
-        {
-            config_listener_mon,
-            {config_listener_mon, start_link, [?MODULE, nil]},
-            permanent,
-            5000,
-            worker,
-            [config_listener_mon]
-        },
-        {
-            couch_primary_services,
-            {couch_primary_sup, start_link, []},
-            permanent,
-            infinity,
-            supervisor,
-            [couch_primary_sup]
-        },
-        {
-            couch_secondary_services,
-            {couch_secondary_sup, start_link, []},
-            permanent,
-            infinity,
-            supervisor,
-            [couch_secondary_sup]
-        }
-    ]}}.
-
+    {ok,
+        {{one_for_one, 10, 60}, [
+            {
+                config_listener_mon,
+                {config_listener_mon, start_link, [?MODULE, nil]},
+                permanent,
+                5000,
+                worker,
+                [config_listener_mon]
+            },
+            {
+                couch_primary_services,
+                {couch_primary_sup, start_link, []},
+                permanent,
+                infinity,
+                supervisor,
+                [couch_primary_sup]
+            },
+            {
+                couch_secondary_services,
+                {couch_secondary_sup, start_link, []},
+                permanent,
+                infinity,
+                supervisor,
+                [couch_secondary_sup]
+            }
+        ]}}.
 
 handle_config_change("daemons", _, _, _, _) ->
     exit(whereis(?MODULE), shutdown),
     remove_handler;
 handle_config_change("couchdb", "util_driver_dir", _, _, _) ->
-    [Pid] = [P || {collation_driver, P, _, _}
-        <- supervisor:which_children(couch_primary_services)],
+    [Pid] = [
+        P
+     || {collation_driver, P, _, _} <-
+            supervisor:which_children(couch_primary_services)
+    ],
     Pid ! reload_driver,
     {ok, nil};
 handle_config_change(_, _, _, _, _) ->
@@ -87,47 +87,69 @@ handle_config_change(_, _, _, _, _) ->
 handle_config_terminate(_Server, _Reason, _State) ->
     ok.
 
+assert_no_monsters() ->
+    couch_log:info("Preflight check: Checking For Monsters~n", []),
+    case erlang:get_cookie() of
+        monster ->
+            couch_log:info(
+                "~n%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%~n" ++
+                    "  Monster detected ohno!, aborting startup.                      ~n" ++
+                    "  Please change the Erlang cookie in vm.args to the same         ~n" ++
+                    "  securely generated random value on all nodes of this cluster.  ~n" ++
+                    "%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%~n",
+                []
+            ),
+            % Wait a second so the log message can make it to the log
+            timer:sleep(500),
+            erlang:halt(1);
+        _ ->
+            ok
+    end.
+
 assert_admins() ->
     couch_log:info("Preflight check: Asserting Admin Account~n", []),
     case {config:get("admins"), os:getenv("COUCHDB_TEST_ADMIN_PARTY_OVERRIDE")} of
         {[], false} ->
-            couch_log:info("~n%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%~n"
-                          ++ "  No Admin Account Found, aborting startup.                  ~n"
-                          ++ "  Please configure an admin account in your local.ini file.  ~n"
-                          ++ "%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%~n", []),
+            couch_log:info(
+                "~n%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%~n" ++
+                    "  No Admin Account Found, aborting startup.                  ~n" ++
+                    "  Please configure an admin account in your local.ini file.  ~n" ++
+                    "%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%~n",
+                []
+            ),
             % Wait a second so the log message can make it to the log
             timer:sleep(500),
             erlang:halt(1);
-        _ -> ok
+        _ ->
+            ok
     end.
 
 send_no_admin_account_error_message() ->
-    couch_log:error("No Admin Account configured."
-        ++ " Please configure an Admin Account in your local.ini file and restart CouchDB.~n", []),
+    couch_log:error(
+        "No Admin Account configured." ++
+            " Please configure an Admin Account in your local.ini file and restart CouchDB.~n",
+        []
+    ),
     FiveMinutes = 5 * 1000 * 60,
     timer:sleep(FiveMinutes),
     send_no_admin_account_error_message().
-    
+
 maybe_launch_admin_annoyance_reporter() ->
     case os:getenv("COUCHDB_TEST_ADMIN_PARTY_OVERRIDE") of
         false -> ok;
         _ -> spawn_link(fun send_no_admin_account_error_message/0)
     end.
 
-
 notify_starting() ->
     couch_log:info("Apache CouchDB ~s is starting.~n", [
         couch_server:get_version()
     ]).
 
-
 notify_started() ->
     couch_log:info("Apache CouchDB has started. Time to relax.~n", []).
 
-
 notify_error(Error) ->
     couch_log:error("Error starting Apache CouchDB:~n~n    ~p~n~n", [Error]).
-
 
 write_pidfile() ->
     case init:get_argument(pidfile) of

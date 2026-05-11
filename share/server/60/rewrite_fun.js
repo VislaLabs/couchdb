@@ -28,7 +28,7 @@ function rewriteFunInt(fun) {
 
     // If we have a function declaration without an Id, wrap it
     // in an ExpressionStatement and change it into
-    // a FuntionExpression
+    // a FunctionExpression
     if (decl.type == "FunctionDeclaration" && decl.id == null) {
         decl.type = "FunctionExpression";
         ast.body[idx] = {
@@ -40,7 +40,6 @@ function rewriteFunInt(fun) {
     // Generate source from the rewritten AST
     return escodegen.generate(ast);
 }
-
 
 function rewriteFun(funJSON) {
     const fun = JSON.parse(funJSON);

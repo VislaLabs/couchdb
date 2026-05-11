@@ -12,75 +12,193 @@
 
 -module(smoosh_priority_queue).
 
--export([new/0, last_updated/2, is_key/2, in/4, in/5, out/1, size/1, info/1]).
+-export([
+    new/1,
+    name/1,
+    in/4,
+    out/1,
+    info/1,
+    flush/1,
+    to_map/1,
+    from_map/3
+]).
 
 -record(priority_queue, {
-    dict=dict:new(),
-    tree=gb_trees:empty()
+    name,
+    map,
+    tree
 }).
 
-new() ->
-    #priority_queue{}.
+new(Name) ->
+    #priority_queue{name = Name, map = #{}, tree = gb_trees:empty()}.
 
-last_updated(Key, #priority_queue{dict=Dict}) ->
-    case dict:find(Key, Dict) of
-        {ok, {_Priority, {LastUpdatedMTime, _MInt}}} ->
-            LastUpdatedMTime;
-        error ->
-            false
-    end.
+name(#priority_queue{name = Name}) ->
+    Name.
 
-is_key(Key, #priority_queue{dict=Dict}) ->
-    dict:is_key(Key, Dict).
+flush(#priority_queue{} = Q) ->
+    Q#priority_queue{map = #{}, tree = gb_trees:empty()}.
 
-in(Key, Value, Priority, Q) ->
-    in(Key, Value, Priority, infinity, Q).
-
-in(Key, Value, Priority, Capacity, #priority_queue{dict=Dict, tree=Tree}) ->
-    Tree1 = case dict:find(Key, Dict) of
+in(Key, Priority, Capacity, #priority_queue{map = Map, tree = Tree} = Q) ->
+    case maps:find(Key, Map) of
+        {ok, {Priority, _}} ->
+            % Priority matches, keep everything as is. This might be the case
+            % for upgrade channels, for instance, where priority is 1.
+            Q;
         {ok, TreeKey} ->
-            gb_trees:delete_any(TreeKey, Tree);
+            Tree1 = gb_trees:delete(TreeKey, Tree),
+            insert(Key, Priority, Capacity, Q#priority_queue{tree = Tree1});
         error ->
-            Tree
-    end,
-    Now = {erlang:monotonic_time(), erlang:unique_integer([monotonic])},
-    TreeKey1 = {Priority, Now},
-    Tree2 = gb_trees:enter(TreeKey1, {Key, Value}, Tree1),
-    Dict1 = dict:store(Key, TreeKey1, Dict),
-    truncate(Capacity, #priority_queue{dict=Dict1, tree=Tree2}).
-
-out(#priority_queue{dict=Dict,tree=Tree}) ->
-    case gb_trees:is_empty(Tree) of
-    true ->
-        false;
-    false ->
-        {_, {Key, Value}, Tree1} = gb_trees:take_largest(Tree),
-        Dict1 = dict:erase(Key, Dict),
-        {Key, Value, #priority_queue{dict=Dict1, tree=Tree1}}
+            insert(Key, Priority, Capacity, Q)
     end.
 
-size(#priority_queue{tree=Tree}) ->
+out(#priority_queue{map = Map, tree = Tree} = Q) ->
+    case gb_trees:is_empty(Tree) of
+        true ->
+            false;
+        false ->
+            {_, Key, Tree1} = gb_trees:take_largest(Tree),
+            {Key, Q#priority_queue{map = maps:remove(Key, Map), tree = Tree1}}
+    end.
+
+qsize(#priority_queue{tree = Tree}) ->
     gb_trees:size(Tree).
 
-info(#priority_queue{tree=Tree}=Q) ->
-    [{size, ?MODULE:size(Q)}|
-     case gb_trees:is_empty(Tree) of
-         true ->
-             [];
-         false ->
-             {Min, _, _} = gb_trees:take_smallest(Tree),
-             {Max, _, _} = gb_trees:take_largest(Tree),
-             [{min, Min}, {max, Max}]
-     end].
+info(#priority_queue{tree = Tree} = Q) ->
+    [
+        {size, qsize(Q)}
+        | case gb_trees:is_empty(Tree) of
+            true ->
+                [];
+            false ->
+                {{Min, _}, _} = gb_trees:smallest(Tree),
+                {{Max, _}, _} = gb_trees:largest(Tree),
+                [{min, Min}, {max, Max}]
+        end
+    ].
 
-truncate(infinity, Q) ->
-    Q;
-truncate(Capacity, Q) when Capacity > 0 ->
-    truncate(Capacity, ?MODULE:size(Q), Q).
+insert(Key, Priority, Capacity, #priority_queue{tree = Tree, map = Map} = Q) ->
+    TreeKey = {Priority, make_ref()},
+    Tree1 = gb_trees:insert(TreeKey, Key, Tree),
+    truncate(Capacity, Q#priority_queue{map = Map#{Key => TreeKey}, tree = Tree1}).
 
-truncate(Capacity, Size, Q) when Size =< Capacity ->
+truncate(Capacity, Q) when is_integer(Capacity), Capacity > 0 ->
+    truncate(Capacity, qsize(Q), Q).
+
+truncate(Capacity, Size, Q) when is_integer(Capacity), Size =< Capacity ->
     Q;
-truncate(Capacity, Size, #priority_queue{dict=Dict, tree=Tree}) when Size > 0 ->
-    {_, {Key, _}, Tree1} = gb_trees:take_smallest(Tree),
-    Q1 = #priority_queue{dict=dict:erase(Key, Dict), tree=Tree1},
-    truncate(Capacity, ?MODULE:size(Q1), Q1).
+truncate(Capacity, Size, Q) when is_integer(Capacity), Size > 0 ->
+    #priority_queue{map = Map, tree = Tree} = Q,
+    {_, Key, Tree1} = gb_trees:take_smallest(Tree),
+    Q1 = Q#priority_queue{map = maps:remove(Key, Map), tree = Tree1},
+    truncate(Capacity, qsize(Q1), Q1).
+
+% Serialize the queue to/from simple maps which look like #{Key => Priority}.
+% The intent is for these to be used by the smoosh persistence facility.
+%
+to_map(#priority_queue{map = Map}) ->
+    Fun = fun(_Key, {Priority, _Ref}) ->
+        Priority
+    end,
+    maps:map(Fun, Map).
+
+from_map(Name, Capacity, #{} = SerializedMap) ->
+    Fun = fun(Key, Priority, Acc) ->
+        insert(Key, Priority, Capacity, Acc)
+    end,
+    maps:fold(Fun, new(Name), SerializedMap).
+
+-ifdef(TEST).
+
+-include_lib("couch/include/couch_eunit.hrl").
+
+-define(K1, <<"db1">>).
+-define(K2, {<<"db1">>, <<"design/_doc1">>}).
+-define(K3, {index_cleanup, <<"db1">>}).
+-define(P1, 1).
+-define(P2, 2.4).
+-define(P3, infinity).
+
+basics_test() ->
+    Q = new("foo"),
+    ?assertMatch(#priority_queue{}, Q),
+    ?assertEqual("foo", name(Q)),
+    ?assertEqual([{size, 0}], info(Q)).
+
+empty_test() ->
+    Q = new("foo"),
+    ?assertEqual(false, out(Q)),
+    ?assertEqual(Q, truncate(1, Q)),
+    ?assertEqual(Q, flush(Q)),
+    ?assertEqual(#{}, to_map(Q)),
+    ?assertEqual(Q, from_map("foo", 1, #{})).
+
+one_element_test() ->
+    Q0 = new("foo"),
+    Q = in(?K1, ?P1, 1, Q0),
+    ?assertMatch(#priority_queue{}, Q),
+    ?assertEqual([{size, 1}, {min, 1}, {max, 1}], info(Q)),
+    ?assertEqual(Q, truncate(1, Q)),
+    ?assertMatch({?K1, #priority_queue{}}, out(Q)),
+    {?K1, Q2} = out(Q),
+    ?assertEqual(Q2, Q0),
+    ?assertEqual(#{?K1 => ?P1}, to_map(Q)),
+    Q3 = from_map("foo", 1, to_map(Q)),
+    ?assertEqual("foo", name(Q3)),
+    ?assertEqual([{size, 1}, {min, ?P1}, {max, ?P1}], info(Q3)),
+    ?assertEqual(to_map(Q), to_map(Q3)),
+    ?assertEqual(Q0, flush(Q)).
+
+multiple_elements_basics_test() ->
+    Q0 = new("foo"),
+    Q1 = in(?K1, ?P1, 10, Q0),
+    Q2 = in(?K2, ?P2, 10, Q1),
+    Q3 = in(?K3, ?P3, 10, Q2),
+    ?assertEqual([{size, 3}, {min, ?P1}, {max, ?P3}], info(Q3)),
+    ?assertEqual([?K3, ?K2, ?K1], drain(Q3)).
+
+update_element_same_priority_test() ->
+    Q0 = new("foo"),
+    Q1 = in(?K1, ?P1, 10, Q0),
+    ?assertEqual(Q1, in(?K1, ?P1, 10, Q1)).
+
+update_element_new_priority_test() ->
+    Q0 = new("foo"),
+    Q1 = in(?K1, ?P1, 10, Q0),
+    Q2 = in(?K2, ?P2, 10, Q1),
+    Q3 = in(?K1, ?P3, 10, Q2),
+    ?assertEqual([{size, 2}, {min, ?P2}, {max, ?P3}], info(Q3)),
+    ?assertEqual([?K1, ?K2], drain(Q3)).
+
+capacity_test() ->
+    Q0 = new("foo"),
+    Q1 = in(?K1, ?P1, 2, Q0),
+    % Capacity = 1, one element only remains
+    ?assertEqual([?K2], drain(in(?K2, ?P2, 1, Q1))),
+    % Capacity = 2, only top two elements remain
+    Q2 = in(?K2, ?P2, 2, Q1),
+    Q3 = in(?K3, ?P3, 2, Q2),
+    ?assertEqual([?K3, ?K2], drain(Q3)).
+
+a_lot_of_elements_test() ->
+    N = 100000,
+    KVs = lists:map(
+        fun(I) ->
+            P = rand:uniform(100),
+            {{I, P}, P}
+        end,
+        lists:seq(1, N)
+    ),
+    Q = from_map("foo", N, maps:from_list(KVs)),
+    ?assertMatch([{size, N} | _], info(Q)),
+    {_, Priorities} = lists:unzip(drain(Q)),
+    ?assertEqual(lists:reverse(lists:sort(Priorities)), Priorities).
+
+drain(Q) ->
+    lists:reverse(drain(out(Q), [])).
+
+drain(false, Acc) ->
+    Acc;
+drain({Key, Q}, Acc) ->
+    drain(out(Q), [Key | Acc]).
+
+-endif.

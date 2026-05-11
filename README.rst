@@ -1,12 +1,14 @@
 Apache CouchDB README
 =====================
 
-+-----+
-| |1| |
-+-----+
++---------+
+| |1| |2| |
++---------+
 
-.. |1| image:: https://ci-couchdb.apache.org/job/jenkins-cm1/job/FullPlatformMatrix/job/master/badge/icon?subject=master%20build
-    :target: https://ci-couchdb.apache.org/blue/organizations/jenkins/jenkins-cm1%2FFullPlatformMatrix/activity?branch=master
+.. |1| image:: https://ci-couchdb.apache.org/job/jenkins-cm1/job/FullPlatformMatrix/job/main/badge/icon?subject=main
+    :target: https://ci-couchdb.apache.org/blue/organizations/jenkins/jenkins-cm1%2FFullPlatformMatrix/activity?branch=main
+.. |2| image:: https://readthedocs.org/projects/couchdb/badge/?version=main
+    :target: https://docs.couchdb.org/en/main/?badge=main
 
 Installation
 ------------
@@ -28,23 +30,23 @@ Documentation
 
 We have documentation:
 
-    http://docs.couchdb.org/
+    https://docs.couchdb.org/
 
 It includes a changelog:
 
-    http://docs.couchdb.org/en/latest/whatsnew/
+    https://docs.couchdb.org/en/latest/whatsnew/
 
 For troubleshooting or cryptic error messages, see:
 
-    http://docs.couchdb.org/en/latest/install/troubleshooting.html
+    https://docs.couchdb.org/en/latest/install/troubleshooting.html
 
 For general help, see:
 
-     http://couchdb.apache.org/#mailing-list
+     https://couchdb.apache.org/#mailing-list
      
 We also have an IRC channel:
 
-    http://webchat.freenode.net/?channels=couchdb
+    https://web.libera.chat/#couchdb
 
 The mailing lists provide a wealth of support and knowledge for you to tap into.
 Feel free to drop by with your questions or discussion. See the official CouchDB
@@ -59,6 +61,25 @@ Run a basic test suite for CouchDB by browsing here:
 
 Getting started with developing
 -------------------------------
+
+**Quickstart:**
+
+
+.. image:: https://img.shields.io/static/v1?label=Remote%20-%20Containers&message=Open&color=blue&logo=visualstudiocode
+    :target: https://vscode.dev/redirect?url=vscode://ms-vscode-remote.remote-containers/cloneInVolume?url=https://github.com/apache/couchdb
+
+If you already have VS Code and Docker installed, you can click the badge above or 
+`here <https://vscode.dev/redirect?url=vscode://ms-vscode-remote.remote-containers/cloneInVolume?url=https://github.com/apache/couchdb>`_ 
+to get started. Clicking these links will cause VS Code to automatically install the 
+Remote - Containers extension if needed, clone the source code into a container volume, 
+and spin up a dev container for use.
+
+This ``devcontainer`` will automatically run ``./configure && make`` the first time it is created.  
+While this may take some extra time to spin up, this tradeoff means you will be able to 
+run things like ``./dev/run``, ``./dev/run --admin=admin:admin``,  ``./dev/run --with-admin-party-please``, 
+and ``make check`` straight away.  Subsequent startups should be quick.
+
+**Manual Dev Setup:**
 
 For more detail, read the README-DEV.rst file in this directory.
 
@@ -81,7 +102,7 @@ Contributing to CouchDB
 
 You can learn more about our contributing process here:
 
-    https://github.com/apache/couchdb/blob/master/CONTRIBUTING.md
+    https://github.com/apache/couchdb/blob/main/CONTRIBUTING.md
 
 Cryptographic Software Notice
 -----------------------------
@@ -91,7 +112,7 @@ currently reside may have restrictions on the import, possession, use, and/or
 re-export to another country, of encryption software. BEFORE using any
 encryption software, please check your country's laws, regulations and policies
 concerning the import, possession, or use, and re-export of encryption software,
-to see if this is permitted. See <http://www.wassenaar.org/> for more
+to see if this is permitted. See <https://www.wassenaar.org/> for more
 information.
 
 The U.S. Government Department of Commerce, Bureau of Industry and Security

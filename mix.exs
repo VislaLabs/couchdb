@@ -28,7 +28,7 @@ defmodule Mix.Tasks.Suite do
   ```
   """
   use Mix.Task
-  @shortdoc "Outputs all availabe integration tests"
+  @shortdoc "Outputs all available integration tests"
   def run(_) do
     Path.wildcard(Path.join(Mix.Project.build_path(), "/**/ebin"))
     |> Enum.filter(&File.dir?/1)
@@ -50,7 +50,7 @@ defmodule CouchDBTest.Mixfile do
     [
       app: :couchdbtest,
       version: "0.1.0",
-      elixir: "~> 1.5",
+      elixir: "~> 1.13",
       lockfile: Path.expand("mix.lock", __DIR__),
       deps_path: Path.expand("src", __DIR__),
       build_path: Path.expand("_build", __DIR__),
@@ -61,6 +61,7 @@ defmodule CouchDBTest.Mixfile do
       consolidate_protocols: Mix.env() not in [:test, :dev, :integration],
       test_paths: get_test_paths(Mix.env()),
       elixirc_paths: elixirc_paths(Mix.env()),
+      prune_code_paths: false,
       test_coverage: [
         tool: CoverTool,
         dirs: get_coverage_paths(),
@@ -84,17 +85,31 @@ defmodule CouchDBTest.Mixfile do
 
   # Run "mix help deps" to learn about dependencies.
   defp deps() do
-    [
+    deps_list = [
       {:junit_formatter, "~> 3.0", only: [:dev, :test, :integration]},
       {:httpotion, ">= 3.1.3", only: [:dev, :test, :integration], runtime: false},
       {:excoveralls, "~> 0.12", only: :test},
-      {:b64url, path: Path.expand("src/b64url", __DIR__)},
-      {:jiffy, path: Path.expand("src/jiffy", __DIR__)},
-      {:jwtf, path: Path.expand("src/jwtf", __DIR__)},
-      {:ibrowse,
-       path: Path.expand("src/ibrowse", __DIR__), override: true, compile: false},
-      {:credo, "~> 1.5.4", only: [:dev, :test, :integration], runtime: false}
+      {:b64url, path: path("b64url")},
+      {:jiffy, path: path("jiffy")},
+      {:jwtf, path: path("jwtf")},
+      {:ibrowse, path: path("ibrowse"), override: true},
+      {:credo, "~> 1.6.4", only: [:dev, :test, :integration], runtime: false}
     ]
+
+    # Some deps may be missing during source check
+    # Besides we don't want to spend time checking them anyway
+    List.foldl([:b64url, :jiffy, :jwtf, :ibrowse], deps_list, fn dep, acc ->
+      if File.dir?(acc[dep][:path]) do
+        acc
+      else
+        List.keydelete(acc, dep, 0)
+      end
+    end)
+  end
+
+  defp path(app) do
+    lib_dir = Path.expand("src", __DIR__)
+    Path.expand(app, lib_dir)
   end
 
   def get_test_paths(:test) do
@@ -141,8 +156,7 @@ defmodule CouchDBTest.Mixfile do
       "khash",
       "hyper",
       "fauxton",
-      "folsom",
-      "hqueue"
+      "folsom"
     ]
 
     deps |> Enum.map(fn app -> "src/#{app}" end)
