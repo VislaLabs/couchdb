@@ -530,22 +530,24 @@ ensure_security(User, UserDb, TransformFun) ->
                 couch_log:error("couch_peruser ensure_security failure on ~s for shards ~p. Please fix manually", [UserDb, Shards]),
                 ok;
             true ->
+                %% braid 287e565 "feat: public user dbs": when public:true is
+                %% set on _security, do NOT enforce a members entry. Original
+                %% commit computed Props for this purpose but accidentally
+                %% discarded it and hardcoded the foldl list to both keys
+                %% (Props was assigned then never used). Now actually pass
+                %% Props through so public DBs keep an empty/absent members
+                %% list as intended (XonePACS Experity etc).
                 Props = case couch_util:get_value(<<"public">>, SecProps, false) of
                     true ->
                         [<<"admins">>];
                     false ->
                         [<<"admins">>, <<"members">>]
-                    end,
-                %% NOTE: Props is currently unused; hardcoded list below
-                %% matches the historical behaviour (see braid 287e565
-                %% "feat: public user dbs"). Preserving as-is to keep this
-                %% refactor behaviourally equivalent.
-                _ = Props,
+                end,
                 case
                     lists:foldl(
                         fun(Prop, SAcc) -> TransformFun(User, Prop, SAcc) end,
                         {false, SecProps},
-                        [<<"admins">>, <<"members">>]
+                        Props
                     )
                 of
                     {false, _} ->
